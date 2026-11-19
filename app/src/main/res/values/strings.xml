@@ -1,5 +1,7 @@
 <resources>
     <string name="app_name">Lumetro</string>
+    <string name="screen_content_tile">屏幕取字</string>
+    <string name="clipboard_content_tile">剪贴板取字</string>
 
     <string name="restart">重启</string>
     <string name="on">开启</string>

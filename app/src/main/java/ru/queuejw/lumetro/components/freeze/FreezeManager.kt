@@ -1,6 +1,7 @@
 package ru.queuejw.lumetro.components.freeze
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -43,6 +44,19 @@ object FreezeManager {
         val json = prefs.getString("frozen_states", "{}") ?: "{}"
         val obj = JSONObject(json)
         return obj.optBoolean(pkg, false)
+    }
+
+    /**
+     * 查询系统真实冻结状态（组件被禁用或被挂起），查询失败时回退本地缓存。
+     * 本地 frozen_states 只是意图缓存，可能因外部改动或写入失败而与实际不一致。
+     */
+    fun isActuallyFrozen(context: Context, pkg: String): Boolean {
+        return try {
+            val info = context.packageManager.getApplicationInfo(pkg, 0)
+            !info.enabled || (info.flags and ApplicationInfo.FLAG_SUSPENDED) != 0
+        } catch (e: Exception) {
+            isFrozen(context, pkg)
+        }
     }
 
     fun getHiddenList(context: Context): List<String> {

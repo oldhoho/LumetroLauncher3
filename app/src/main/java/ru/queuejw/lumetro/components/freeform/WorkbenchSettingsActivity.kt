@@ -1,11 +1,13 @@
 package ru.queuejw.lumetro.components.freeform
 
+import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
 import android.util.Log
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import ru.queuejw.lumetro.R
+import ru.queuejw.lumetro.ai.AiConsoleActivity
 import ru.queuejw.lumetro.components.core.sidebar.SidebarAccessibilityService
 import ru.queuejw.lumetro.components.freeform.gesture.LeftGestureStripManager
 import java.io.File
@@ -46,8 +48,9 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
     private lateinit var tvAppListCornerValue: TextView
     private lateinit var tvAppListDimValue: TextView
 
-    // ========== 磁贴面板开关 ==========
-    private lateinit var switchTilesPanel: Switch
+    // ========== 列表图标间距 ==========
+    private lateinit var seekbarIconSpacing: SeekBar
+    private lateinit var tvIconSpacingValue: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,8 +112,9 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
         tvAppListCornerValue = findViewById(R.id.tv_applist_corner_value)
         tvAppListDimValue = findViewById(R.id.tv_applist_dim_value)
 
-        // ========== 磁贴面板开关 ==========
-        switchTilesPanel = findViewById(R.id.switch_tiles_panel)
+        // ========== 列表图标间距 ==========
+        seekbarIconSpacing = findViewById(R.id.seekbar_icon_spacing)
+        tvIconSpacingValue = findViewById(R.id.tv_icon_spacing_value)
 
         // ========== 设置SeekBar范围 ==========
         seekbarAppListOffset.max = 400      // 0-400dp
@@ -118,6 +122,7 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
         seekbarAppListWidth.max = 100       // 0.5-1.0
         seekbarAppListCorner.max = 50       // 0-50dp
         seekbarAppListDim.max = 90          // 0-90%
+        seekbarIconSpacing.max = 30         // 0-30dp
     }
 
     private fun setupListeners() {
@@ -258,23 +263,32 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-        // ========== 磁贴面板禁用开关 ==========
-        switchTilesPanel.setOnCheckedChangeListener { _, isChecked ->
-            settings.tilesPanelEnabled = isChecked
-            Toast.makeText(this, if (isChecked) "磁贴面板已启用" else "磁贴面板已禁用", Toast.LENGTH_SHORT).show()
-        }
+        // ========== 列表图标左右间距 ==========
+        seekbarIconSpacing.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                tvIconSpacingValue.text = "${progress}dp"
+                if (fromUser) {
+                    settings.iconSpacing = progress
+                    if (settings.enabled) {
+                        WorkbenchManager.showWorkbench()
+                    }
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
 
         // ========== 按钮监听器 ==========
         findViewById<Button>(R.id.btn_apply_settings).setOnClickListener {
             applySettings()
         }
 
-        findViewById<Button>(R.id.btn_reset_settings).setOnClickListener {
-            resetSettings()
-        }
-
         findViewById<Button>(R.id.btn_close).setOnClickListener {
             finish()
+        }
+
+        findViewById<Button>(R.id.btn_ai_console)?.setOnClickListener {
+            startActivity(Intent(this, AiConsoleActivity::class.java))
         }
 
         findViewById<Button>(R.id.btn_icon_pack)?.setOnClickListener {
@@ -359,8 +373,8 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
             settings.appListCornerRadius = seekbarAppListCorner.progress
             settings.appListDimAlpha = seekbarAppListDim.progress / 100f * 0.9f
 
-            // ========== 磁贴面板开关 ==========
-            settings.tilesPanelEnabled = switchTilesPanel.isChecked
+            // ========== 列表图标间距 ==========
+            settings.iconSpacing = seekbarIconSpacing.progress
 
             if (settings.enabled) {
                 WorkbenchManager.showWorkbench()
@@ -378,16 +392,6 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
             e.printStackTrace()
             Toast.makeText(this, "应用失败: ${e.message}", Toast.LENGTH_LONG).show()
         }
-    }
-
-    private fun resetSettings() {
-        settings.resetToDefaults()
-        gestureManager.updateConfig(6, 0, 0, 0.3f)
-        if (!gestureManager.isShowing()) {
-            gestureManager.show()
-        }
-        loadSettings()
-        Toast.makeText(this, "已重置为默认设置", Toast.LENGTH_SHORT).show()
     }
 
     private fun loadSettings() {
@@ -439,8 +443,10 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
         seekbarAppListDim.progress = (dimAlpha / 0.9f * 100).toInt().coerceIn(0, 90)
         tvAppListDimValue.text = "${(dimAlpha * 100).toInt()}%"
 
-        // ========== 磁贴面板开关 ==========
-        switchTilesPanel.isChecked = settings.tilesPanelEnabled
+        // ========== 列表图标间距 ==========
+        val spacing = settings.iconSpacing
+        seekbarIconSpacing.progress = spacing.coerceIn(0, 30)
+        tvIconSpacingValue.text = "${spacing}dp"
     }
 
     /**

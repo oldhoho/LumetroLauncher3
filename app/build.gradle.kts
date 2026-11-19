@@ -24,6 +24,7 @@ android {
     namespace = "ru.queuejw.lumetro"
     compileSdk = 34
     buildToolsVersion = "34.0.0"
+    ndkVersion = "27.0.12077973"
 
     buildFeatures {
         viewBinding = true
@@ -35,7 +36,17 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 2
-        versionName = "Sunflower 1 Preview 2"
+        versionName = "2.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+            }
+        }
 
     }
 
@@ -73,10 +84,66 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/ocrModelAssets"))
+        }
+    }
+
+    androidResources {
+        noCompress += "xz"
+    }
+
+    packaging {
+        jniLibs.keepDebugSymbols.add("**/libc++_shared.so")
+    }
+}
+
+val compressOcrModels by tasks.registering(Exec::class) {
+    val sourceDir = layout.projectDirectory.dir("src/main/modelAssets/models")
+    val outputDir = layout.buildDirectory.dir("generated/ocrModelAssets/models")
+    val archiveFile = outputDir.map { it.file("ocr_models.tar.xz") }
+    val versionFile = outputDir.map { it.file("ocr_models.version") }
+
+    inputs.dir(sourceDir)
+    inputs.file(rootProject.layout.projectDirectory.file("tools/compress_ocr_models.py"))
+    outputs.file(archiveFile)
+    outputs.file(versionFile)
+
+    val defaultPythonExecutable = providers.systemProperty("os.name").map { name ->
+        if (name.startsWith("Windows", ignoreCase = true)) "python" else "python3"
+    }
+
+    commandLine(
+        providers.gradleProperty("pythonExecutable").orElse(defaultPythonExecutable).get(),
+        rootProject.layout.projectDirectory.file("tools/compress_ocr_models.py").asFile.absolutePath,
+        "--source",
+        sourceDir.asFile.absolutePath,
+        "--output",
+        archiveFile.get().asFile.absolutePath,
+        "--version-output",
+        versionFile.get().asFile.absolutePath,
+    )
+}
+
+tasks.matching {
+    (it.name.startsWith("merge") && it.name.endsWith("Assets")) ||
+        it.name.contains("lint", ignoreCase = true)
+}.configureEach {
+    dependsOn(compressOcrModels)
 }
 
 dependencies {
     implementation("com.belerweb:pinyin4j:2.5.1")
+    implementation("org.tukaani:xz:1.12")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")

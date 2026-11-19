@@ -38,7 +38,9 @@ class IconPackManager(val context: Context) {
         private var iconPackRes: Resources? = null
 
         @SuppressLint("DiscouragedApi")
+        @Synchronized
         private fun load() {
+            if (mLoaded) return
             runCatching {
                 val parser: XmlPullParser? = run {
                     iconPackRes = context.packageManager.getResourcesForApplication(packageName!!)

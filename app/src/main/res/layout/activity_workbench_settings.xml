@@ -457,28 +457,42 @@
                 android:progress="80" />
         </LinearLayout>
         
-        <!-- ========== 磁贴面板开关 ========== -->
-<LinearLayout
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
-    android:paddingVertical="8dp">
+        <!-- ========== 列表图标左右间距 ========== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingVertical="8dp">
 
-    <TextView
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:text="磁贴面板"
-        android:textColor="@android:color/white"
-        android:textSize="14sp" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
 
-    <Switch
-        android:id="@+id/switch_tiles_panel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="列表图标左右间距"
+                    android:textColor="@android:color/white"
+                    android:textSize="14sp" />
 
-</LinearLayout>
+                <TextView
+                    android:id="@+id/tv_icon_spacing_value"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0dp"
+                    android:textColor="@android:color/holo_green_light"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/seekbar_icon_spacing"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="30"
+                android:progress="0" />
+        </LinearLayout>
         
 
         <!-- ========== 分隔线 ========== -->
@@ -494,6 +508,15 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:paddingVertical="8dp">
+
+            <Button
+                android:id="@+id/btn_ai_console"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="🤖 AI 控制台"
+                android:textSize="14sp"
+                android:backgroundTint="#7B1FA2"
+                android:layout_marginBottom="8dp" />
 
             <Button
                 android:id="@+id/btn_icon_pack"
@@ -529,15 +552,6 @@
                 android:text="🔄 刷新应用列表"
                 android:textSize="14sp"
                 android:backgroundTint="#3F51B5"
-                android:layout_marginBottom="8dp" />
-
-            <Button
-                android:id="@+id/btn_reset_settings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="↺ 重置为默认"
-                android:textSize="14sp"
-                android:backgroundTint="#FF3333"
                 android:layout_marginBottom="8dp" />
 
             <Button

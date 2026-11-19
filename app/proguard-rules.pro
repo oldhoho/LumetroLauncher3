@@ -19,3 +19,5 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# PP-OCRv5 JNI looks these classes and native methods up by name.
+-keep class me.fleey.ppocrv5.ocr.** { *; }

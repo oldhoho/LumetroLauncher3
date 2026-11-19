@@ -6,7 +6,6 @@ import ru.queuejw.lumetro.components.freeform.util.LogBuffer
 import ru.queuejw.lumetro.components.freeform.util.TouchLogger
 import android.widget.ScrollView
 import android.accessibilityservice.AccessibilityService
-import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -39,6 +38,7 @@ import kotlin.math.atan2
 import ru.queuejw.lumetro.components.core.icons.IconLoader
 import ru.queuejw.lumetro.components.core.sidebar.AppListPanel
 import ru.queuejw.lumetro.components.core.sidebar.KeyboardKeyBindings
+import ru.queuejw.lumetro.components.freeze.ShizukuHelper
 import ru.queuejw.lumetro.components.freeform.helper.FreeformHackHelper
 import ru.queuejw.lumetro.components.freeform.util.U
 import ru.queuejw.lumetro.model.App
@@ -128,7 +128,6 @@ private var cachedApps: MutableList<App> = mutableListOf()
     private var currentPage = 0
     private val ITEMS_PER_PAGE = 6
     private val blacklist = mutableSetOf<String>()
-    private val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
     private enum class Mode {
         NORMAL, ADD, REMOVE
@@ -1004,16 +1003,25 @@ return if (snapshot.isNotEmpty()) snapshot else apps
         searchAppSlots.clear()
         appSlots.clear()
 
-        val settingsPkg = "com.android.settings"
-        if (isAppInstalled(settingsPkg)) {
-            for (i in 0 until 6) {
-                workbenchAppSlots.add(settingsPkg to "设置")
-            }
-        } else {
-            for (i in 0 until 6) {
+        val saved = settings.appSlots
+        if (saved.isNotEmpty()) {
+            workbenchAppSlots.addAll(saved)
+            while (workbenchAppSlots.size < 6) {
                 workbenchAppSlots.add("" to "")
             }
+        } else {
+            val settingsPkg = "com.android.settings"
+            val pkg = if (isAppInstalled(settingsPkg)) settingsPkg else ""
+            val name = if (pkg.isEmpty()) "" else "设置"
+            for (i in 0 until 6) {
+                workbenchAppSlots.add(pkg to name)
+            }
         }
+        saveSlots()
+    }
+
+    private fun saveSlots() {
+        settings.appSlots = workbenchAppSlots
     }
 
     private fun isAppInstalled(packageName: String): Boolean {
@@ -1070,6 +1078,7 @@ return if (snapshot.isNotEmpty()) snapshot else apps
                 appSlots.addAll(workbenchAppSlots)
             }
 
+            saveSlots()
             refreshAppSlots()
         } catch (e: Exception) {
             Log.e(TAG, "updateForegroundApp failed", e)
@@ -1208,6 +1217,7 @@ return if (snapshot.isNotEmpty()) snapshot else apps
             appSlots.clear()
             appSlots.addAll(workbenchAppSlots)
         }
+        saveSlots()
         refreshAppSlots()
     }
 
@@ -1705,7 +1715,16 @@ if (snapFB.isEmpty()) {
             onPrevPage = { previousPage() },
             onNextPage = { nextPage() },
             onRecentGesture = { performRecent() },
-            onOpenSearch = { showAppsList() }
+            onOpenSearch = {
+                try {
+                    context.startActivity(
+                        Intent(context, ru.queuejw.lumetro.ai.AiInputActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "open AiInputActivity failed", e)
+                }
+            }
         ).apply {
             setBackgroundColor(Color.parseColor("#FF1A1A1A"))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -2180,6 +2199,9 @@ private inner class GestureContainer(
 
         val currentApps = getCurrentPageApps()
 
+        val spacingPx = settings.iconSpacing.coerceIn(0, 30).dpToPx()
+        val itemWidth = (slotWidth - spacingPx * 2).coerceAtLeast(1)
+
         val slot1View = createSlot1View(slotWidth)
         wrapper.addView(slot1View)
 
@@ -2188,9 +2210,14 @@ private inner class GestureContainer(
             if (i < currentApps.size) {
                 val (pkg, name) = currentApps[i]
                 val isForeground = (pkg == foregroundPackage)
-                wrapper.addView(createAppItem(pkg, name, isForeground, slotWidth))
+                wrapper.addView(createAppItem(pkg, name, isForeground, itemWidth))
             } else {
-                wrapper.addView(createEmptySlot(slotWidth))
+                wrapper.addView(createEmptySlot(itemWidth))
+            }
+            val last = wrapper.getChildAt(wrapper.childCount - 1)
+            (last.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+                lp.setMargins(spacingPx, 0, spacingPx, 0)
+                last.layoutParams = lp
             }
         }
 
@@ -2252,6 +2279,7 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
                             appSlots.clear()
                             appSlots.addAll(workbenchAppSlots)
                         }
+                        saveSlots()
                         refreshAppSlots()
                         Toast.makeText(context, "已屏蔽 $appName", Toast.LENGTH_SHORT).show()
                     } else if (blacklist.contains(packageName)) {
@@ -3044,49 +3072,92 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
     // 记录点击历史
     preCreatedAppListPanel?.recordAppClick(packageName)
 
-    try {
-        val tasks = activityManager.getRunningTasks(50)
-            for (task in tasks) {
-                val topActivity = task.topActivity
-                if (topActivity != null && topActivity.packageName == packageName) {
-                    activityManager.moveTaskToFront(task.id, 0)
-                    Toast.makeText(context, appName, Toast.LENGTH_SHORT).show()
-                    resetWorkbench()
-                    hideAppsList()
-                    return
-                }
+    // 图标显示与实际冻结状态不一致时，先解冻再启动，避免点击无反应
+    if (isAppActuallyFrozen(packageName)) {
+        Toast.makeText(context, "$appName 已冻结，正在解冻…", Toast.LENGTH_SHORT).show()
+        manager.unfreezeApp(packageName) { ok ->
+            if (ok) {
+                refreshAppSlots()
+                // 解冻后系统状态更新有延迟，稍等再拉启
+                handler.postDelayed({ launchAppByIntent(packageName, appName) }, 300)
+            } else {
+                Toast.makeText(context, "解冻失败，无法启动 $appName", Toast.LENGTH_SHORT).show()
+            }
+        }
+        return
+    }
+
+    // 先收起工作台，避免等待后台恢复任务期间界面无响应
+    hideAppsList()
+
+    val shizuku = ShizukuHelper.getInstance()
+    coroutineScope.launch(Dispatchers.IO) {
+        // Shizuku 可能重连过，状态缓存不可靠，每次点击先刷新，否则会误走冷启动
+        val restored = try {
+            shizuku.checkStatus()
+            shizuku.isReady() && shizuku.moveTaskToFront(packageName)
+        } catch (e: Exception) {
+            Log.e(TAG, "restoreRunningTask failed", e)
+            false
+        }
+
+        withContext(Dispatchers.Main) {
+            if (restored) {
+                Toast.makeText(context, appName, Toast.LENGTH_SHORT).show()
+            } else {
+                launchAppByIntent(packageName, appName)
+            }
+            resetWorkbench()
+
+            workbenchAppSlots.removeAll { it.first == "" }
+            workbenchAppSlots.removeAll { it.first == packageName }
+            workbenchAppSlots.add(0, packageName to appName)
+            while (workbenchAppSlots.size > MAX_APPS) {
+                workbenchAppSlots.removeAt(workbenchAppSlots.size - 1)
             }
 
-            val pm = context.packageManager
-            val launchIntent = pm.getLaunchIntentForPackage(packageName)
+            while (workbenchAppSlots.size < 6) {
+                workbenchAppSlots.add("" to "")
+            }
+
+            isSearchMode = false
+            appSlots.clear()
+            appSlots.addAll(workbenchAppSlots)
+            currentPage = 0
+            saveSlots()
+            refreshAppSlots()
+        }
+    }
+}
+
+    /**
+     * 无法恢复已有任务栈时的回退启动。
+     * getLaunchIntentForPackage 自带 RESET_TASK_IF_NEEDED，会重置已有任务导致应用重启，
+     * 这里覆盖为仅 NEW_TASK。
+     */
+    private fun isAppActuallyFrozen(packageName: String): Boolean {
+        return try {
+            val info = context.packageManager.getApplicationInfo(packageName, 0)
+            !info.enabled || (info.flags and android.content.pm.ApplicationInfo.FLAG_SUSPENDED) != 0
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun launchAppByIntent(packageName: String, appName: String) {
+        try {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
             if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                launchIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(launchIntent)
                 Toast.makeText(context, appName, Toast.LENGTH_SHORT).show()
-                resetWorkbench()
-                hideAppsList()
+            } else {
+                Toast.makeText(context, "无法启动 $appName", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             Log.e(TAG, "switchToApp failed", e)
             Toast.makeText(context, "启动失败", Toast.LENGTH_SHORT).show()
         }
-
-        workbenchAppSlots.removeAll { it.first == "" }
-        workbenchAppSlots.removeAll { it.first == packageName }
-        workbenchAppSlots.add(0, packageName to appName)
-        while (workbenchAppSlots.size > MAX_APPS) {
-            workbenchAppSlots.removeAt(workbenchAppSlots.size - 1)
-        }
-
-        while (workbenchAppSlots.size < 6) {
-            workbenchAppSlots.add("" to "")
-        }
-
-        isSearchMode = false
-        appSlots.clear()
-        appSlots.addAll(workbenchAppSlots)
-        currentPage = 0
-        refreshAppSlots()
     }
 
     private fun getNavBarHeight(): Int {

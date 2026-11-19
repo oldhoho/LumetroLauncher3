@@ -29,6 +29,7 @@ import net.sourceforge.pinyin4j.format.HanyuPinyinCaseType
 import net.sourceforge.pinyin4j.format.HanyuPinyinOutputFormat
 import net.sourceforge.pinyin4j.format.HanyuPinyinToneType
 import net.sourceforge.pinyin4j.format.HanyuPinyinVCharType
+import ru.queuejw.lumetro.ai.AiConsoleClient
 import ru.queuejw.lumetro.components.core.icons.IconLoader
 import ru.queuejw.lumetro.components.freeze.FreezeManager
 import ru.queuejw.lumetro.components.freeze.ShizukuHelper
@@ -751,6 +752,7 @@ class AppListPanel(
                     KeyboardKeyBindings.BindingType.APP -> "应用"
                     KeyboardKeyBindings.BindingType.SHORTCUT -> "快捷方式"
                     KeyboardKeyBindings.BindingType.CUSTOM -> "自定义"
+                    KeyboardKeyBindings.BindingType.AI_COMMAND -> "AI 命令"
                     else -> ""
                 }
                 val displayText = "$digit  →  ${binding.label}    [$typeLabel]"
@@ -794,13 +796,13 @@ class AppListPanel(
         }
 
         val addCustomBtn = TextView(context).apply {
-            text = "➕ 添加"
+            text = "自定义"
             textSize = 13f
             setTextColor(Color.parseColor("#FF88CCFF"))
             gravity = Gravity.CENTER
-            setPadding(12.dpToPx(), 12.dpToPx(), 12.dpToPx(), 12.dpToPx())
+            setPadding(8.dpToPx(), 12.dpToPx(), 8.dpToPx(), 12.dpToPx())
             setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                 setMargins(4.dpToPx(), 0, 4.dpToPx(), 0)
             }
             setOnClickListener {
@@ -808,6 +810,22 @@ class AppListPanel(
             }
         }
         buttonRow.addView(addCustomBtn)
+
+        val aiCommandBtn = TextView(context).apply {
+            text = "AI 命令"
+            textSize = 13f
+            setTextColor(Color.parseColor("#FFCC88FF"))
+            gravity = Gravity.CENTER
+            setPadding(8.dpToPx(), 12.dpToPx(), 8.dpToPx(), 12.dpToPx())
+            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(4.dpToPx(), 0, 4.dpToPx(), 0)
+            }
+            setOnClickListener {
+                showDigitPickerForAi(holder)
+            }
+        }
+        buttonRow.addView(aiCommandBtn)
 
         val clearAllBtn = TextView(context).apply {
             text = "清除全部"
@@ -877,6 +895,7 @@ class AppListPanel(
             KeyboardKeyBindings.BindingType.APP -> "应用"
             KeyboardKeyBindings.BindingType.SHORTCUT -> "快捷方式"
             KeyboardKeyBindings.BindingType.CUSTOM -> "自定义"
+            KeyboardKeyBindings.BindingType.AI_COMMAND -> "AI 命令"
             else -> ""
         }
 
@@ -1028,6 +1047,197 @@ class AppListPanel(
             ).apply {
                 topMargin = 12.dpToPx()
             }
+            setOnClickListener {
+                showBindingsListView(holder, bindingsListSnapshot)
+            }
+        }
+        contentLayout.addView(cancelBtn)
+
+        holder.addView(contentLayout)
+    }
+
+    private fun showDigitPickerForAi(holder: FrameLayout) {
+        holder.removeAllViews()
+
+        val contentLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#FF1A1A1A"))
+            setPadding(16.dpToPx(), 16.dpToPx(), 16.dpToPx(), 16.dpToPx())
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val titleView = TextView(context).apply {
+            text = "选择要绑定 AI 命令的数字键"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 16.dpToPx())
+        }
+        contentLayout.addView(titleView)
+
+        val scrollView = ScrollView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        val listContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        for (d in 0..9) {
+            val digitStr = d.toString()
+            val existing = keyBindings.getBinding(digitStr)
+            val statusText = if (existing.type != KeyboardKeyBindings.BindingType.NONE) {
+                "（已绑定：${existing.label}）"
+            } else ""
+
+            val itemView = TextView(context).apply {
+                text = "$digitStr 键  $statusText"
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                setPadding(16.dpToPx(), 14.dpToPx(), 16.dpToPx(), 14.dpToPx())
+                setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+                isClickable = true
+
+                val lp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                lp.bottomMargin = 6.dpToPx()
+                layoutParams = lp
+
+                setOnClickListener {
+                    showAiCommandEditor(holder, digitStr)
+                }
+            }
+            listContainer.addView(itemView)
+        }
+
+        scrollView.addView(listContainer)
+        contentLayout.addView(scrollView)
+
+        val cancelBtn = TextView(context).apply {
+            text = "取消"
+            textSize = 14f
+            setTextColor(Color.GRAY)
+            gravity = Gravity.CENTER
+            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
+            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = 12.dpToPx()
+            }
+            setOnClickListener {
+                showBindingsListView(holder, bindingsListSnapshot)
+            }
+        }
+        contentLayout.addView(cancelBtn)
+
+        holder.addView(contentLayout)
+    }
+
+    private fun showAiCommandEditor(holder: FrameLayout, digit: String) {
+        holder.removeAllViews()
+
+        val contentLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#FF1A1A1A"))
+            setPadding(16.dpToPx(), 16.dpToPx(), 16.dpToPx(), 16.dpToPx())
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val existing = keyBindings.getBinding(digit)
+        val isAiBinding = existing.type == KeyboardKeyBindings.BindingType.AI_COMMAND
+
+        val titleView = TextView(context).apply {
+            text = "编辑 $digit 键 AI 命令"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 12.dpToPx())
+        }
+        contentLayout.addView(titleView)
+
+        val nameInput = EditText(context).apply {
+            hint = "显示名称（可留空）"
+            setText(if (isAiBinding) existing.label else "")
+            setHintTextColor(Color.parseColor("#88FFFFFF"))
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+            setPadding(12.dpToPx(), 10.dpToPx(), 12.dpToPx(), 10.dpToPx())
+        }
+        contentLayout.addView(nameInput)
+
+        val commandInput = EditText(context).apply {
+            hint = "AI 命令，例如：打开B站听歌"
+            setText(if (isAiBinding) existing.value else "")
+            setHintTextColor(Color.parseColor("#88FFFFFF"))
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+            setPadding(12.dpToPx(), 10.dpToPx(), 12.dpToPx(), 10.dpToPx())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 8.dpToPx() }
+        }
+        contentLayout.addView(commandInput)
+
+        val saveBtn = TextView(context).apply {
+            text = "保存"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
+            setBackgroundColor(Color.parseColor("#FF2A8A4A"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 12.dpToPx() }
+            setOnClickListener {
+                val command = commandInput.text.toString().trim()
+                if (command.isEmpty()) {
+                    Toast.makeText(context, "请填写 AI 命令", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val label = nameInput.text.toString().trim().ifBlank { command.take(10) }
+                keyBindings.setBinding(
+                    digit,
+                    KeyboardKeyBindings.Binding(
+                        type = KeyboardKeyBindings.BindingType.AI_COMMAND,
+                        value = command,
+                        label = label
+                    )
+                )
+                Toast.makeText(context, "$digit 键已绑定 AI 命令", Toast.LENGTH_SHORT).show()
+                bindingsListSnapshot = keyBindings.getAllBindings()
+                showBindingsListView(holder, bindingsListSnapshot)
+            }
+        }
+        contentLayout.addView(saveBtn)
+
+        val cancelBtn = TextView(context).apply {
+            text = "取消"
+            textSize = 14f
+            setTextColor(Color.GRAY)
+            gravity = Gravity.CENTER
+            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
+            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 8.dpToPx() }
             setOnClickListener {
                 showBindingsListView(holder, bindingsListSnapshot)
             }
@@ -1877,6 +2087,22 @@ class AppListPanel(
                     onHidePanel()
                 } catch (e: Exception) {
                     Toast.makeText(context, "启动自定义 Intent 失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            KeyboardKeyBindings.BindingType.AI_COMMAND -> {
+                if (binding.value.isBlank()) {
+                    Toast.makeText(context, "AI 命令为空", Toast.LENGTH_SHORT).show()
+                } else {
+                    AiConsoleClient.init(context)
+                    AiConsoleClient.sendTask(binding.value) { ok, msg ->
+                        Toast.makeText(
+                            context,
+                            if (ok) "已发送：${binding.label}" else msg,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    onHidePanel()
                 }
             }
 

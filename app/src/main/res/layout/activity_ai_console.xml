@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F0121212"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/et_ai_server"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#22FFFFFF"
+            android:hint="服务器地址，如 http://127.0.0.1:8080"
+            android:inputType="textUri"
+            android:padding="10dp"
+            android:singleLine="true"
+            android:textColor="@android:color/white"
+            android:textColorHint="#88FFFFFF"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_ai_server_save"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="保存"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/et_ai_task"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#33FFFFFF"
+            android:hint="输入任务，例如：打开B站听歌"
+            android:inputType="text"
+            android:padding="12dp"
+            android:singleLine="true"
+            android:textColor="@android:color/white"
+            android:textColorHint="#88FFFFFF"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btn_ai_send"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="发送"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tv_ai_state"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="AI 空闲"
+        android:textColor="#88FFFFFF"
+        android:textSize="12sp" />
+
+    <ScrollView
+        android:id="@+id/scroll_ai_log"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_weight="1"
+        android:background="@drawable/bg_ai_log"
+        android:padding="10dp">
+
+        <TextView
+            android:id="@+id/tv_ai_log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="#CCFFFFFF"
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
+    </ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_ai_card"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="最近总结"
+            android:textColor="@android:color/white"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_report_time"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#88FFFFFF"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/tv_report_summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:maxLines="6"
+            android:textColor="#DDDDDD"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+</LinearLayout>

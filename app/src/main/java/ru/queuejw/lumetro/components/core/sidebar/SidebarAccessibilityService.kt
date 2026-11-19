@@ -1,21 +1,36 @@
 package ru.queuejw.lumetro.components.core.sidebar
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import ru.queuejw.lumetro.components.core.ai.AiStatusManager
+import ru.queuejw.lumetro.components.core.ai.AiStatusOverlay
 import ru.queuejw.lumetro.components.core.receivers.AppReceiver
 import ru.queuejw.lumetro.components.freeform.WorkbenchManager
 import ru.queuejw.lumetro.components.freeform.WorkbenchSettings
 import ru.queuejw.lumetro.components.freeform.gesture.LeftGestureStripManager
 import ru.queuejw.lumetro.components.freeze.ShizukuHelper
+import ru.queuejw.lumetro.components.inspire.ScreenContentController
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 class SidebarAccessibilityService : AccessibilityService() {
 
@@ -30,6 +45,12 @@ class SidebarAccessibilityService : AccessibilityService() {
         private var instance: SidebarAccessibilityService? = null
 
         fun getInstance(): SidebarAccessibilityService? = instance
+
+        fun startScreenContent(): Boolean {
+            val service = instance ?: return false
+            service.startScreenContentSelection()
+            return true
+        }
 
         fun isServiceEnabled(context: Context): Boolean {
             val serviceName = "${context.packageName}/${SidebarAccessibilityService::class.java.name}"
@@ -100,22 +121,31 @@ class SidebarAccessibilityService : AccessibilityService() {
 
     private var receiver: BroadcastReceiver? = null
     private var appReceiver: AppReceiver? = null
+    private var aiStatusOverlay: AiStatusOverlay? = null
+    private val aiStatusListener: (String, String?) -> Unit = { state, text ->
+        aiStatusOverlay?.update(state, text)
+    }
     private var lastPackage = ""
     private var isFullscreen = false
     private var fullscreenCheckHandler = Handler(Looper.getMainLooper())
     private var fullscreenCheckRunnable: Runnable? = null
+    private var screenContentController: ScreenContentController? = null
+    private val screenshotExecutor: ExecutorService =
+        ThreadPoolExecutor(1, 2, 30, TimeUnit.SECONDS, ArrayBlockingQueue(10))
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
 
         try {
-            serviceInfo = AccessibilityServiceInfo().apply {
-                eventTypes = AccessibilityEvent.TYPES_ALL_MASK
-                feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-                flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                        AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
-                notificationTimeout = 100
+            serviceInfo?.let { info ->
+                info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+                info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+                info.flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                        AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE or
+                        AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+                info.notificationTimeout = 100
+                serviceInfo = info
             }
             Log.d(TAG, "Accessibility service connected")
 
@@ -179,8 +209,17 @@ class SidebarAccessibilityService : AccessibilityService() {
                 Log.e(TAG, "Failed to init", e)
             }
 
+            aiStatusOverlay?.release()
+            aiStatusOverlay = AiStatusOverlay(this)
+            AiStatusManager.init(this)
+            AiStatusManager.addListener(aiStatusListener)
+            // 工作台重建后若状态还在 10 秒有效期内，立即恢复显示
+            if (AiStatusManager.isFresh(AiStatusOverlay.TIMEOUT_MS)) {
+                aiStatusOverlay?.update(AiStatusManager.state, AiStatusManager.text)
+            }
             setupReceiver()
             setupAppReceiver()
+            screenContentController = ScreenContentController(this)
 
         } catch (e: Exception) {
             Log.e(TAG, "onServiceConnected error", e)
@@ -293,13 +332,69 @@ class SidebarAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Service interrupted")
     }
 
+    fun startScreenContentSelection() {
+        screenContentController?.startSelection()
+            ?: Log.w(TAG, "Screen content controller is not ready")
+    }
+
+    fun processClipboardText(text: String) {
+        screenContentController?.processClipboardText(text)
+            ?: Log.w(TAG, "Screen content controller is not ready")
+    }
+
+    fun processClipboardImage(uri: android.net.Uri) {
+        screenContentController?.processClipboardImage(uri)
+            ?: Log.w(TAG, "Screen content controller is not ready")
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    suspend fun takeScreenshot(): Bitmap? = withTimeoutOrNull(3500L) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return@withTimeoutOrNull null
+        }
+        suspendCancellableCoroutine { continuation ->
+            takeScreenshot(0, screenshotExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    if (!continuation.isActive) {
+                        screenshot.hardwareBuffer.close()
+                        return
+                    }
+                    val bitmap = runCatching {
+                        var hardwareBitmap: Bitmap? = null
+                        try {
+                            hardwareBitmap = Bitmap.wrapHardwareBuffer(
+                                screenshot.hardwareBuffer,
+                                screenshot.colorSpace,
+                            )
+                            hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, true)
+                        } finally {
+                            hardwareBitmap?.recycle()
+                            screenshot.hardwareBuffer.close()
+                        }
+                    }.getOrNull()
+                    continuation.resume(bitmap) { bitmap?.recycle() }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            })
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+        screenContentController?.destroy()
+        screenContentController = null
+        screenshotExecutor.shutdownNow()
         fullscreenCheckHandler.removeCallbacksAndMessages(null)
         try {
             receiver?.let { unregisterReceiver(it) }
             appReceiver?.let { unregisterReceiver(it) }
+            AiStatusManager.removeListener(aiStatusListener)
+            aiStatusOverlay?.release()
+            aiStatusOverlay = null
 
             LeftGestureStripManager.destroyInstance()
             gestureStripManager = null
@@ -348,6 +443,17 @@ class SidebarAccessibilityService : AccessibilityService() {
                                 Log.e(TAG, "SHOW_WORKBENCH error", e)
                             }
                         }
+                        "ru.queuejw.lumetro.AI_STATUS" -> {
+                            try {
+                                AiStatusManager.update(
+                                    context,
+                                    intent.getStringExtra("state") ?: AiStatusManager.STATE_HIDDEN,
+                                    intent.getStringExtra("text")
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "AI_STATUS error", e)
+                            }
+                        }
                         "ru.queuejw.lumetro.UPDATE_GESTURE_STRIP" -> {
                             try {
                                 refreshGestureStrip()
@@ -358,7 +464,7 @@ class SidebarAccessibilityService : AccessibilityService() {
                     }
                 }
             }
-            registerReceiver(receiver, IntentFilter().apply {
+            ContextCompat.registerReceiver(this, receiver, IntentFilter().apply {
                 addAction("ru.queuejw.lumetro.SHOW_PANEL")
                 addAction("ru.queuejw.lumetro.UPDATE_PANEL_BG")
                 addAction("ru.queuejw.lumetro.UPDATE_TILES")
@@ -366,7 +472,8 @@ class SidebarAccessibilityService : AccessibilityService() {
                 addAction("ru.queuejw.lumetro.TOGGLE_WORKBENCH")
                 addAction("ru.queuejw.lumetro.SHOW_WORKBENCH")
                 addAction("ru.queuejw.lumetro.UPDATE_GESTURE_STRIP")
-            })
+                addAction("ru.queuejw.lumetro.AI_STATUS")
+            }, ContextCompat.RECEIVER_EXPORTED)
         } catch (e: Exception) {
             Log.e(TAG, "setupReceiver error", e)
         }

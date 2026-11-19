@@ -736,7 +736,11 @@ while (isLoadingApps && retryCount < 10) {
 
     fun isAppFrozen(pkg: String): Boolean {
         return try {
-            FreezeManager.isFrozen(context, pkg)
+            val real = FreezeManager.isActuallyFrozen(context, pkg)
+            if (real != FreezeManager.isFrozen(context, pkg)) {
+                FreezeManager.setFrozen(context, pkg, real)
+            }
+            real
         } catch (e: Exception) {
             Log.e(TAG, "isAppFrozen error", e)
             false

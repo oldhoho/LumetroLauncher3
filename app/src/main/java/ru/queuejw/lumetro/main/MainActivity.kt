@@ -39,7 +39,7 @@ class MainActivity : AppCompatActivity() {
     private var volumePressCount = 0
     private var lastVolumePressTime = 0L
     private var unlockReceiver: BroadcastReceiver? = null
-    
+
     override fun onResume() {
     super.onResume()
     // 每次回到前台，检查权限是否给了

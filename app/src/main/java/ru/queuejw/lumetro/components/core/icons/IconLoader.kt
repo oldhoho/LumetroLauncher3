@@ -33,7 +33,7 @@ class IconLoader(
         }
     }
 
-    private fun cacheKey(pkg: String) = if (loadFromIconPack) "${iconPackPackage}_$pkg" else pkg
+    private fun cacheKey(pkg: String) = if (loadFromIconPack) "v2_${iconPackPackage}_$pkg" else "v2_$pkg"
 
     private fun getIconSize(context: Context): Int {
         return context.resources.getDimensionPixelSize(R.dimen.icon_size)
@@ -67,10 +67,13 @@ class IconLoader(
                 if (icon != null) {
                     icon.toBitmap(iconSize!!, iconSize!!)?.also { cacheBitmap(it, key) }
                 } else {
+                    // 图标包没有该应用时回退系统图标，但不能写入图标包缓存，
+                    // 否则该应用以后会一直显示默认图标
                     try {
                         context.packageManager.getApplicationIcon(mPackage).toBitmap(iconSize!!, iconSize!!)
-                            .also { cacheBitmap(it, key) }
-                    } catch (e: Exception) { null }
+                    } catch (e: Exception) {
+                        null
+                    }
                 }
             }
         }.getOrNull()

@@ -24,7 +24,8 @@ class KeyboardKeyBindings(context: Context) {
         NONE,
         APP,
         SHORTCUT,
-        CUSTOM
+        CUSTOM,
+        AI_COMMAND
     }
 
     data class Binding(

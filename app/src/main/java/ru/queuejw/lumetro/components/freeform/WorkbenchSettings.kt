@@ -2,6 +2,8 @@ package ru.queuejw.lumetro.components.freeform
 
 import android.content.Context
 import android.content.SharedPreferences
+import org.json.JSONArray
+import org.json.JSONObject
 
 class WorkbenchSettings(context: Context) {
 
@@ -94,25 +96,35 @@ class WorkbenchSettings(context: Context) {
             prefs.edit().putBoolean("tiles_panel_enabled", value).apply()
         }
 
-    fun resetToDefaults() {
-        try {
-            prefs.edit().clear().apply()
-            height = 46
-            enabled = true
-            showAppsListOnStart = false
-            autoHideDelay = 0
-            appListWidthRatio = 0.85f
-            appListHeightRatio = 0.9f
-            appListVerticalOffset = 0
-            appListCornerRadius = 24
-            appListDimAlpha = 0.8f
-            gestureStripWidth = 6
-            gestureStripHeight = 0
-            gestureStripOffset = 0
-            gestureStripAlpha = 0.3f
-            tilesPanelEnabled = true
-        } catch (e: Exception) {
-            // 忽略
+    // ========== 工作台固定应用槽位 ==========
+    var appSlots: List<Pair<String, String>>
+        get() {
+            val raw = prefs.getString("workbench_app_slots", null) ?: return emptyList()
+            return try {
+                val array = JSONArray(raw)
+                (0 until array.length()).map { i ->
+                    val obj = array.getJSONObject(i)
+                    obj.getString("pkg") to obj.getString("name")
+                }
+            } catch (e: Exception) {
+                emptyList()
+            }
         }
-    }
+        set(value) {
+            val array = JSONArray()
+            value.forEach { (pkg, name) ->
+                array.put(JSONObject().apply {
+                    put("pkg", pkg)
+                    put("name", name)
+                })
+            }
+            prefs.edit().putString("workbench_app_slots", array.toString()).apply()
+        }
+
+    // ========== 工作台列表图标左右间距（dp，0-30） ==========
+    var iconSpacing: Int
+        get() = prefs.getInt("workbench_icon_spacing", 0)
+        set(value) {
+            prefs.edit().putInt("workbench_icon_spacing", value.coerceIn(0, 30)).apply()
+        }
 }
