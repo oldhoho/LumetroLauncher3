@@ -25,7 +25,13 @@ class KeyboardKeyBindings(context: Context) {
         APP,
         SHORTCUT,
         CUSTOM,
-        AI_COMMAND
+        AI_TASK,
+        BUILTIN
+    }
+
+    object BuiltinAction {
+        const val SCREEN_CONTENT = "screen_content"
+        const val CLIPBOARD_CONTENT = "clipboard_content"
     }
 
     data class Binding(

@@ -104,6 +104,51 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:text="常用任务"
+            android:textColor="@android:color/white"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="九键输入时按首字母或全拼匹配，也可绑定到数字键"
+            android:textColor="#88FFFFFF"
+            android:textSize="11sp" />
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_marginTop="6dp">
+
+            <LinearLayout
+                android:id="@+id/container_ai_tasks"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
+
+        <Button
+            android:id="@+id/btn_ai_task_add"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="+ 新建常用任务"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_ai_card"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:text="最近总结"
             android:textColor="@android:color/white"
             android:textSize="13sp"

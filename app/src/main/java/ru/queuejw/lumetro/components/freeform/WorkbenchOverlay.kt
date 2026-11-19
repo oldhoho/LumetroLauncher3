@@ -1715,15 +1715,8 @@ if (snapFB.isEmpty()) {
             onPrevPage = { previousPage() },
             onNextPage = { nextPage() },
             onRecentGesture = { performRecent() },
-            onOpenSearch = {
-                try {
-                    context.startActivity(
-                        Intent(context, ru.queuejw.lumetro.ai.AiInputActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "open AiInputActivity failed", e)
-                }
+            onOpenKeyboard = {
+                showAppsList()
             }
         ).apply {
             setBackgroundColor(Color.parseColor("#FF1A1A1A"))
@@ -1782,7 +1775,7 @@ private inner class GestureContainer(
     private val onPrevPage: () -> Unit,
     private val onNextPage: () -> Unit,
     private val onRecentGesture: () -> Unit,
-    private val onOpenSearch: () -> Unit
+    private val onOpenKeyboard: () -> Unit
 ) : FrameLayout(context) {
 
     private var touchStartX = 0f
@@ -1963,8 +1956,8 @@ private inner class GestureContainer(
                     when (gesturePhase) {
                         1 -> {
                             gestureCompleted = true
-                            TouchLogger.log("TE -> onOpenSearch")
-                            onOpenSearch()
+                            TouchLogger.log("TE -> onOpenKeyboard")
+                            onOpenKeyboard()
                             resetState()
                             return true
                         }
@@ -2668,6 +2661,38 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
             }
             selectShortcutBtn.layoutParams = shortcutLp
             contentLayout.addView(selectShortcutBtn)
+
+            val builtinActions = listOf(
+                KeyboardKeyBindings.BuiltinAction.SCREEN_CONTENT to "屏幕取字",
+                KeyboardKeyBindings.BuiltinAction.CLIPBOARD_CONTENT to "剪贴板取字"
+            )
+            for ((action, actionLabel) in builtinActions) {
+                val builtinBtn = TextView(context).apply {
+                    text = actionLabel
+                    textSize = 15f
+                    setTextColor(Color.WHITE)
+                    setPadding(16.dpToPx(), 14.dpToPx(), 16.dpToPx(), 14.dpToPx())
+                    setBackgroundColor(Color.parseColor("#FF2A2A2A"))
+                    setOnClickListener {
+                        keyBindings.setBinding(digit, KeyboardKeyBindings.Binding(
+                            type = KeyboardKeyBindings.BindingType.BUILTIN,
+                            value = action,
+                            label = actionLabel
+                        ))
+                        Toast.makeText(context, "$digit 键已绑定：$actionLabel", Toast.LENGTH_SHORT).show()
+                        dismissKeyBindingDialog()
+                        refreshAppList()
+                    }
+                }
+                val builtinLp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 8.dpToPx()
+                }
+                builtinBtn.layoutParams = builtinLp
+                contentLayout.addView(builtinBtn)
+            }
 
             val currentBinding = keyBindings.getBinding(digit)
             if (currentBinding.type != KeyboardKeyBindings.BindingType.NONE) {

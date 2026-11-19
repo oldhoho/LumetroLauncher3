@@ -135,12 +135,4 @@
         <item name="materialButtonStyle">@style/Metro.Button</item>
         <item name="materialSwitchStyle">@style/Metro.Switch</item>
     </style>
-    <style name="Theme.AiInput" parent="Theme.AppCompat.NoActionBar">
-        <item name="android:windowIsTranslucent">true</item>
-        <item name="android:windowBackground">@android:color/transparent</item>
-        <item name="android:backgroundDimEnabled">false</item>
-        <item name="android:windowContentOverlay">@null</item>
-        <item name="android:windowAnimationStyle">@null</item>
-        <item name="android:windowNoTitle">true</item>
-    </style>
 </resources>
