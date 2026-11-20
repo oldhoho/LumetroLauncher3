@@ -32,6 +32,7 @@ class KeyboardKeyBindings(context: Context) {
     object BuiltinAction {
         const val SCREEN_CONTENT = "screen_content"
         const val CLIPBOARD_CONTENT = "clipboard_content"
+        const val PIN_POOL = "pin_pool"
     }
 
     data class Binding(

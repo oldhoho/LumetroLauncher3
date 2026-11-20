@@ -236,7 +236,8 @@ class LandscapeWorkbenchOverlay(
                 onUnlockRequested = {
                     hideLockOverlay()
                     show()
-                }
+                },
+                onKeyLongPress = { digit -> manager.showDigitBindingDialog(digit) }
             )
         }
         

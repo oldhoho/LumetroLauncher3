@@ -10,6 +10,12 @@ import ru.queuejw.lumetro.R
 import ru.queuejw.lumetro.ai.AiConsoleActivity
 import ru.queuejw.lumetro.components.core.sidebar.SidebarAccessibilityService
 import ru.queuejw.lumetro.components.freeform.gesture.LeftGestureStripManager
+import ru.queuejw.lumetro.components.prefs.Prefs
+import ru.queuejw.lumetro.gesture.TriggerSide
+import ru.queuejw.lumetro.pin.PinPoolFloating
+import ru.queuejw.lumetro.settings.AppearanceSettingsActivity
+import ru.queuejw.lumetro.settings.InspireSettingsActivity
+import ru.queuejw.lumetro.settings.SearchEngineSettingsActivity
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -20,6 +26,7 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
     private lateinit var settings: WorkbenchSettings
     private lateinit var gestureManager: LeftGestureStripManager
     private var workbenchManager: WorkbenchManager? = null
+    private lateinit var prefs: Prefs
 
     // ========== 工作台设置控件 ==========
     private lateinit var switchEnabled: Switch
@@ -52,6 +59,11 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
     private lateinit var seekbarIconSpacing: SeekBar
     private lateinit var tvIconSpacingValue: TextView
 
+    // ========== 屏幕取字 ==========
+    private lateinit var switchOcrPriority: Switch
+    private lateinit var switchScreenDoubleCheck: Switch
+    private lateinit var switchImageTextSelection: Switch
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_workbench_settings)
@@ -59,6 +71,7 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
         Log.d("Settings", "=== onCreate ===")
 
         settings = WorkbenchSettings(this)
+        prefs = Prefs(this)
 
         val service = SidebarAccessibilityService.getInstance()
         Log.d("Settings", "service = $service")
@@ -115,6 +128,11 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
         // ========== 列表图标间距 ==========
         seekbarIconSpacing = findViewById(R.id.seekbar_icon_spacing)
         tvIconSpacingValue = findViewById(R.id.tv_icon_spacing_value)
+
+        // ========== 屏幕取字 ==========
+        switchOcrPriority = findViewById(R.id.switch_ocr_priority)
+        switchScreenDoubleCheck = findViewById(R.id.switch_screen_double_check)
+        switchImageTextSelection = findViewById(R.id.switch_image_text_selection)
 
         // ========== 设置SeekBar范围 ==========
         seekbarAppListOffset.max = 400      // 0-400dp
@@ -291,6 +309,22 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
             startActivity(Intent(this, AiConsoleActivity::class.java))
         }
 
+        findViewById<Button>(R.id.btn_search_engine_settings)?.setOnClickListener {
+            startActivity(Intent(this, SearchEngineSettingsActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btn_pin_pool)?.setOnClickListener {
+            PinPoolFloating.start(applicationContext, side = TriggerSide.peek())
+        }
+
+        findViewById<Button>(R.id.btn_inspire_settings)?.setOnClickListener {
+            startActivity(Intent(this, InspireSettingsActivity::class.java))
+        }
+
+        findViewById<Button>(R.id.btn_appearance_settings)?.setOnClickListener {
+            startActivity(Intent(this, AppearanceSettingsActivity::class.java))
+        }
+
         findViewById<Button>(R.id.btn_icon_pack)?.setOnClickListener {
             try {
                 Log.d("Settings", "=== 图标包按钮被点击 ===")
@@ -342,6 +376,15 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
             }
             workbenchManager?.refreshApps()
             Toast.makeText(this, "已触发应用列表刷新", Toast.LENGTH_SHORT).show()
+        }
+
+        // ========== 屏幕取字 ==========
+        switchOcrPriority.setOnCheckedChangeListener { _, isChecked -> prefs.ocrPriority = isChecked }
+        switchScreenDoubleCheck.setOnCheckedChangeListener { _, isChecked ->
+            prefs.screenContentDoubleCheck = isChecked
+        }
+        switchImageTextSelection.setOnCheckedChangeListener { _, isChecked ->
+            prefs.screenContentImageTextSelection = isChecked
         }
     }
 
@@ -447,6 +490,11 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
         val spacing = settings.iconSpacing
         seekbarIconSpacing.progress = spacing.coerceIn(0, 30)
         tvIconSpacingValue.text = "${spacing}dp"
+
+        // ========== 屏幕取字 ==========
+        switchOcrPriority.isChecked = prefs.ocrPriority
+        switchScreenDoubleCheck.isChecked = prefs.screenContentDoubleCheck
+        switchImageTextSelection.isChecked = prefs.screenContentImageTextSelection
     }
 
     /**

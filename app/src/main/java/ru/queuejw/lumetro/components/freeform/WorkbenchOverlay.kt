@@ -2601,6 +2601,10 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
     private var bindingDialogView: View? = null
     private var bindingDialogParams: WindowManager.LayoutParams? = null
 
+    fun showDigitBindingDialog(digit: String) {
+        showKeyBindingDialog(digit)
+    }
+
     private fun showKeyBindingDialog(digit: String) {
         try {
             dismissKeyBindingDialog()
@@ -2664,7 +2668,8 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
 
             val builtinActions = listOf(
                 KeyboardKeyBindings.BuiltinAction.SCREEN_CONTENT to "屏幕取字",
-                KeyboardKeyBindings.BuiltinAction.CLIPBOARD_CONTENT to "剪贴板取字"
+                KeyboardKeyBindings.BuiltinAction.CLIPBOARD_CONTENT to "剪贴板取字",
+                KeyboardKeyBindings.BuiltinAction.PIN_POOL to "📌 Pin 池"
             )
             for ((action, actionLabel) in builtinActions) {
                 val builtinBtn = TextView(context).apply {

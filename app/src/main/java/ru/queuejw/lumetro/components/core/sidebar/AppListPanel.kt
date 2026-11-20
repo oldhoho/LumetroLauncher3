@@ -35,6 +35,8 @@ import ru.queuejw.lumetro.ai.AiTask
 import ru.queuejw.lumetro.ai.AiTaskBar
 import ru.queuejw.lumetro.ai.AiTasks
 import ru.queuejw.lumetro.actions.ClipboardContentActivity
+import ru.queuejw.lumetro.gesture.TriggerSide
+import ru.queuejw.lumetro.pin.PinPoolFloating
 import ru.queuejw.lumetro.components.core.icons.IconLoader
 import ru.queuejw.lumetro.components.freeze.FreezeManager
 import ru.queuejw.lumetro.components.freeze.ShizukuHelper
@@ -1120,7 +1122,8 @@ class AppListPanel(
 
         val actions = listOf(
             KeyboardKeyBindings.BuiltinAction.SCREEN_CONTENT to "屏幕取字",
-            KeyboardKeyBindings.BuiltinAction.CLIPBOARD_CONTENT to "剪贴板取字"
+            KeyboardKeyBindings.BuiltinAction.CLIPBOARD_CONTENT to "剪贴板取字",
+            KeyboardKeyBindings.BuiltinAction.PIN_POOL to "📌 Pin 池"
         )
         for ((action, label) in actions) {
             val itemView = TextView(context).apply {
@@ -2322,6 +2325,17 @@ class AppListPanel(
                                 context.startActivity(
                                     Intent(context, ClipboardContentActivity::class.java)
                                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                )
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+
+                        KeyboardKeyBindings.BuiltinAction.PIN_POOL -> {
+                            try {
+                                PinPoolFloating.start(
+                                    context.applicationContext,
+                                    side = TriggerSide.peek(),
                                 )
                             } catch (e: Exception) {
                                 Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()

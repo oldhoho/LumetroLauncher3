@@ -587,6 +587,10 @@ while (isLoadingApps && retryCount < 10) {
         workbenchOverlayRef?.get()?.updateForegroundApp(packageName)
     }
 
+    fun showDigitBindingDialog(digit: String) {
+        workbenchOverlayRef?.get()?.showDigitBindingDialog(digit)
+    }
+
     fun showAppsList() {
         workbenchOverlayRef?.get()?.showAppsList()
     }
