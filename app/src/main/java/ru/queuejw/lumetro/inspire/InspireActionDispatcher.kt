@@ -49,7 +49,6 @@ internal class InspireActionDispatcher(
         onParticipleShareButtonClick = ::shareImage,
         onParticiplePinImageClick = ::pinImage,
         onParticiplePinImageLongPress = ::pinImageToPool,
-        onParticipleScanQR = ::scanQr,
         onBigBangContentLongPress = { targetContentIndex, _ ->
             splitSegmentedSelectionOrItemToCharacters(targetContentIndex)
         },
@@ -249,15 +248,4 @@ internal class InspireActionDispatcher(
         }
     }
 
-    private fun scanQr() {
-        contentView.acquireImageHandle()?.let { bitmapHandle ->
-            launchImageAction(Dispatchers.Default) {
-                InspireHelperUtils.scanQR(activity, bitmapHandle)?.let { contents ->
-                    withContext(Dispatchers.Main) {
-                        tokenContentController.setCustomContent(contents)
-                    }
-                }
-            }
-        }
-    }
 }

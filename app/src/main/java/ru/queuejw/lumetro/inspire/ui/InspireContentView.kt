@@ -152,7 +152,6 @@ class InspireContentView : MaterialCardView {
             actionWrapper?.handlePinImageLongPress()
             true
         }
-        scanQR.setOnClickListener { actionWrapper?.handleScanQR() }
 
         screenshotPreview.setOnTouchListener { view, event ->
             if (event.actionMasked == MotionEvent.ACTION_DOWN &&

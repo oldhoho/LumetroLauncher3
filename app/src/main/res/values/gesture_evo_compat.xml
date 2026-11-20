@@ -57,8 +57,6 @@
     <string name="inspire_edit_scope_selected">已选中文本</string>
     <string name="inspire_edit_selected_text_contiguous_only">仅支持编辑连续选中的文本</string>
     <string name="inspire_image_edit_load_failed">图片加载失败</string>
-    <string name="inspire_qr_decode_error">解码错误: %1$s</string>
-    <string name="inspire_qr_not_found">未识别到二维码</string>
     <string name="inspire_quick_copy_copied">已复制：%1$s</string>
     <string name="inspire_recognizing">识别中</string>
     <string name="inspire_screenshot_failed">截图失败</string>

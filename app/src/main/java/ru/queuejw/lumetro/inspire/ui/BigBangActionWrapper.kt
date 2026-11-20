@@ -19,7 +19,6 @@ class BigBangActionWrapper(
     private val onParticipleShareButtonClick: (Boolean) -> Unit = {},
     private val onParticiplePinImageClick: () -> Unit = {},
     private val onParticiplePinImageLongPress: () -> Unit = {},
-    private val onParticipleScanQR: () -> Unit = {},
     private val onBigBangContentLongPress: (Int, String) -> Unit = { _, _ -> },
 ) : BigBangStatusListener {
     override fun onSelected() = onBigBangSelected()
@@ -46,7 +45,6 @@ class BigBangActionWrapper(
 
     fun handleUrlClick() = onParticipleURLClick()
     fun handleUrlLongClick() = onParticipleURLLongClick()
-    fun handleScanQR() = onParticipleScanQR()
     fun handleReselectClick() = onParticipleReselectClick()
     fun handleSaveImageClick(isPress: Boolean) = onParticipleSaveImageClick(isPress)
     fun handleOpenImageClick(isPress: Boolean) = onParticipleOpenImageClick(isPress)
