@@ -27,6 +27,8 @@ import ru.queuejw.lumetro.search.config.SearchEngineDataManager
 class SearchEngineSettingsActivity : AppCompatActivity() {
 
     private lateinit var listContainer: LinearLayout
+    private lateinit var defaultEngineValue: TextView
+    private var defaultEngineTag: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,6 +47,24 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
             setTextColor(0xFF777777.toInt())
             setPadding(0, dp(4), 0, dp(12))
         })
+
+        val defaultRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(12))
+            setOnClickListener { showDefaultEngineDialog() }
+        }
+        defaultRow.addView(TextView(this).apply {
+            text = "默认搜索引擎"
+            textSize = 15f
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        defaultEngineValue = TextView(this).apply {
+            text = ""
+            textSize = 15f
+        }
+        defaultRow.addView(defaultEngineValue)
+        root.addView(defaultRow)
 
         listContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(ScrollView(this).apply {
@@ -67,6 +87,10 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
         lifecycleScope.launch {
             SearchEngineDataManager.ensureDefaultEngines(this@SearchEngineSettingsActivity)
             val engines = SearchEngineDataManager.readSearchEngineList(this@SearchEngineSettingsActivity)
+            defaultEngineTag = SearchEngineDataManager.getDefaultEngineTag(this@SearchEngineSettingsActivity)
+            defaultEngineValue.text = SearchEngineDataManager.getDefaultSearchEngine(
+                this@SearchEngineSettingsActivity
+            )?.name ?: "未设置"
             listContainer.removeAllViews()
             if (engines.isEmpty()) {
                 listContainer.addView(TextView(this@SearchEngineSettingsActivity).apply {
@@ -106,6 +130,21 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
                     setTextColor(0xFF777777.toInt())
                 })
             })
+            val isDefault = engine.tag == defaultEngineTag
+            addView(TextView(this@SearchEngineSettingsActivity).apply {
+                text = if (isDefault) "默认" else "设为默认"
+                textSize = 13f
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+                setOnClickListener {
+                    if (isDefault) return@setOnClickListener
+                    lifecycleScope.launch {
+                        SearchEngineDataManager.setDefaultEngineTag(
+                            this@SearchEngineSettingsActivity, engine.tag
+                        )
+                        reload()
+                    }
+                }
+            })
             addView(Button(this@SearchEngineSettingsActivity).apply {
                 text = "编辑"
                 setOnClickListener { showEditDialog(engine) }
@@ -122,6 +161,29 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
                 }
             })
         }
+
+    private fun showDefaultEngineDialog() {
+        lifecycleScope.launch {
+            val engines = SearchEngineDataManager.readSearchEngineList(this@SearchEngineSettingsActivity)
+            if (engines.isEmpty()) return@launch
+            val currentTag = SearchEngineDataManager.getDefaultEngineTag(this@SearchEngineSettingsActivity)
+            val checked = engines.indexOfFirst { it.tag == currentTag }.coerceAtLeast(0)
+            val labels = engines.map { it.name ?: "(未命名)" }.toTypedArray()
+            AlertDialog.Builder(this@SearchEngineSettingsActivity)
+                .setTitle("默认搜索引擎")
+                .setSingleChoiceItems(labels, checked) { dialog, which ->
+                    lifecycleScope.launch {
+                        SearchEngineDataManager.setDefaultEngineTag(
+                            this@SearchEngineSettingsActivity, engines[which].tag
+                        )
+                        dialog.dismiss()
+                        reload()
+                    }
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+    }
 
     private fun showEditDialog(existing: SearchEngine?) {
         val nameInput = EditText(this).apply {

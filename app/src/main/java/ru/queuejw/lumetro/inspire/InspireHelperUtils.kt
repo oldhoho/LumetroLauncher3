@@ -14,6 +14,7 @@ import ru.queuejw.lumetro.components.core.sidebar.SidebarAccessibilityService
 import ru.queuejw.lumetro.gesture.config.GestureActionType
 import ru.queuejw.lumetro.link.LinkLauncher
 import ru.queuejw.lumetro.pin.PinPoolStore
+import ru.queuejw.lumetro.search.config.SearchEngineDataManager
 import ru.queuejw.lumetro.settings.InspireSettingsActivity
 import ru.queuejw.lumetro.settings.InspireSettingsActivity.Companion.KEY_INSPIRE_DELAY_REMOVE_IMAGE
 import ru.queuejw.lumetro.settings.InspireSettingsActivity.Companion.KEY_SEARCH_APP
@@ -185,8 +186,6 @@ object InspireHelperUtils {
         PictureFloating.build(context, text)
     }
 
-    fun scanQR(context: Context, bitmapHandle: ManagedBitmap): List<String>? = null
-
     suspend fun translateText(context: Context, text: String) {
         val pkg = context.settingsStore.readKey(InspireSettingsActivity.KEY_TRANSLATION_APP, "")
         if (pkg.isEmpty()) {
@@ -218,6 +217,28 @@ object InspireHelperUtils {
 
     suspend fun searchText(context: Context, text: String) {
         val encodedQuery = URLEncoder.encode(text, "UTF-8")
+        val defaultEngineLink = SearchEngineDataManager.getDefaultSearchEngine(context)
+            ?.searchLink
+            ?.takeIf { it.isNotBlank() }
+        if (defaultEngineLink != null) {
+            val target = defaultEngineLink
+                .replace("%s", encodedQuery)
+                .replace("%q", text)
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, target.toUri()).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                withContext(Dispatchers.Main) {
+                    context.startActivity(intent)
+                }
+            } catch (ignored: Exception) {
+                ToastHelper.showInUIThread(
+                    context,
+                    context.getString(R.string.inspire_search_link_error)
+                )
+            }
+            return
+        }
         val searchLink = context.settingsStore.readKey(KEY_SEARCH_LINK, "")
         if (searchLink.isEmpty()) {
             val searchApp = context.settingsStore.readKey(KEY_SEARCH_APP, "")
