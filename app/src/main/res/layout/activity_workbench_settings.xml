@@ -540,6 +540,15 @@
             android:backgroundTint="#8E24AA"
             android:layout_marginBottom="8dp" />
 
+        <Button
+            android:id="@+id/btn_keyboard_style"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⌨ 九键与工作条外观"
+            android:textSize="14sp"
+            android:backgroundTint="#00838F"
+            android:layout_marginBottom="8dp" />
+
         <!-- ========== 分隔线 ========== -->
         <View
             android:layout_width="match_parent"

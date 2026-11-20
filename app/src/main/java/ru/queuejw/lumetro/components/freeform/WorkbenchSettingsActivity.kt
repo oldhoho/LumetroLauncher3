@@ -312,6 +312,10 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
             startActivity(Intent(this, AppearanceSettingsActivity::class.java))
         }
 
+        findViewById<Button>(R.id.btn_keyboard_style)?.setOnClickListener {
+            startActivity(Intent(this, KeyboardStyleActivity::class.java))
+        }
+
         findViewById<Button>(R.id.btn_icon_pack)?.setOnClickListener {
             try {
                 Log.d("Settings", "=== 图标包按钮被点击 ===")

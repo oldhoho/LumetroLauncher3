@@ -42,6 +42,8 @@ import ru.queuejw.lumetro.components.freeze.FreezeManager
 import ru.queuejw.lumetro.components.freeze.ShizukuHelper
 import ru.queuejw.lumetro.components.freeform.WorkbenchManager
 import ru.queuejw.lumetro.components.freeform.WorkbenchSettingsActivity
+import ru.queuejw.lumetro.components.freeform.WorkbenchStyle
+import ru.queuejw.lumetro.components.freeform.StyleImageStore
 import ru.queuejw.lumetro.model.App
 import java.io.File
 import java.lang.ref.WeakReference
@@ -74,6 +76,20 @@ class AppListPanel(
     private val perfLogEnabled = false
 
     private val keyBindings = KeyboardKeyBindings.getInstance(context)
+
+    private val workbenchStyle = WorkbenchStyle(context)
+
+    private val keycapImage: Bitmap? by lazy {
+        StyleImageStore.load(context, StyleImageStore.KEYCAP)
+    }
+
+    private val keycapFrameImage: Bitmap? by lazy {
+        StyleImageStore.load(context, StyleImageStore.KEYCAP_FRAME)
+    }
+
+    private val keycapState: android.graphics.drawable.Drawable.ConstantState? by lazy {
+        createMacKeyBackground().constantState
+    }
 
     private val effectiveOverlayContext: Context = overlayContext ?: context
 
@@ -472,7 +488,9 @@ class AppListPanel(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            setBackgroundColor(Color.parseColor("#FF141414"))
+            background = StyleImageStore.background(
+                context, StyleImageStore.KEYBOARD_PANEL, workbenchStyle.keyboardPanelAlpha
+            ) ?: android.graphics.drawable.ColorDrawable(workbenchStyle.keyboardPanel)
             isClickable = true
             isFocusable = true
         }
@@ -481,16 +499,19 @@ class AppListPanel(
 
         aiTaskBar = AiTaskBar(
             context = context,
+            style = workbenchStyle,
             onOpenConsole = { openAiConsole() },
             onSendTask = { sendAiTask(it) },
         )
-        rootContainer.addView(
-            aiTaskBar,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+        if (workbenchStyle.aiBarVisible) {
+            rootContainer.addView(
+                aiTaskBar,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
             )
-        )
+        }
 
         val keyboardContainer = createKeyboardView()
         rootContainer.addView(keyboardContainer)
@@ -503,9 +524,9 @@ class AppListPanel(
     val container = GestureKeyboardContainer(context).apply {
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
-            200.dpToPx()
+            workbenchStyle.keyboardHeightDp.dpToPx()
         )
-        setBackgroundColor(Color.parseColor("#FF141414"))
+        setBackgroundColor(Color.TRANSPARENT)
         setPadding(4.dpToPx(), 6.dpToPx(), 4.dpToPx(), 8.dpToPx())
         gravity = Gravity.CENTER
 
@@ -596,11 +617,11 @@ class AppListPanel(
     private fun createSearchDisplayKey(): View {
     return TextView(context).apply {
         text = ""
-        textSize = 11f
-        setTextColor(Color.parseColor("#FFE8E8E8"))
+        textSize = workbenchStyle.functionTextSizeSp.toFloat()
+        setTextColor(primaryTextColor())
         gravity = Gravity.CENTER
         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.9f).apply {
-            setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+            setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
         }
         // 搜索键：比键盘底更深的色，制造"内凹"感
         background = android.graphics.drawable.GradientDrawable().apply {
@@ -616,13 +637,13 @@ class AppListPanel(
     private fun createSettingsKey(): View {
         return TextView(context).apply {
             text = "⚙"
-            textSize = 14f
-            setTextColor(Color.parseColor("#FFE8E8E8"))
+            textSize = workbenchStyle.functionTextSizeSp.toFloat()
+            setTextColor(primaryTextColor())
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.9f).apply {
-                setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+                setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
             }
-            background = createMacKeyBackground()
+            background = createKeycapBackground()
 
             setOnClickListener {
                 try {
@@ -2008,9 +2029,9 @@ class AppListPanel(
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.9f).apply {
-                setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+                setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
             }
-            background = createMacKeyBackground()
+            background = createKeycapBackground()
             isClickable = true
             isLongClickable = true
 
@@ -2029,8 +2050,8 @@ class AppListPanel(
 
         val mainText = TextView(context).apply {
             text = "隐藏"
-            textSize = 11f
-            setTextColor(Color.parseColor("#FFE8E8E8"))
+            textSize = workbenchStyle.functionTextSizeSp.toFloat()
+            setTextColor(primaryTextColor())
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2043,8 +2064,8 @@ class AppListPanel(
 
         val subText = TextView(context).apply {
             text = "锁定"
-            textSize = 8f
-            setTextColor(Color.parseColor("#66E8E8E8"))
+            textSize = workbenchStyle.subTextSizeSp.toFloat()
+            setTextColor(subTextColor())
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2066,9 +2087,9 @@ class AppListPanel(
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.9f).apply {
-                setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+                setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
             }
-            background = createMacKeyBackground()
+            background = createKeycapBackground()
             isClickable = true
             isLongClickable = true
 
@@ -2088,8 +2109,8 @@ class AppListPanel(
 
         val mainText = TextView(context).apply {
             text = "控制"
-            textSize = 11f
-            setTextColor(Color.parseColor("#FFE8E8E8"))
+            textSize = workbenchStyle.functionTextSizeSp.toFloat()
+            setTextColor(primaryTextColor())
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2102,8 +2123,8 @@ class AppListPanel(
 
         val subText = TextView(context).apply {
             text = "省电"
-            textSize = 8f
-            setTextColor(Color.parseColor("#66E8E8E8"))
+            textSize = workbenchStyle.subTextSizeSp.toFloat()
+            setTextColor(subTextColor())
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2122,11 +2143,11 @@ class AppListPanel(
     // ========== 其他键（原有逻辑） ==========
     return TextView(context).apply {
         text = label
-        textSize = 11f
-        setTextColor(Color.parseColor("#FFE8E8E8"))
+        textSize = workbenchStyle.functionTextSizeSp.toFloat()
+        setTextColor(primaryTextColor())
         gravity = Gravity.CENTER
         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.9f).apply {
-            setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+            setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
         }
         background = createMacKeyBackground()
 
@@ -2170,9 +2191,9 @@ class AppListPanel(
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
-                setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+                setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
             }
-            background = createMacKeyBackground()
+            background = createKeycapBackground()
             isClickable = true
             isLongClickable = true
 
@@ -2194,8 +2215,8 @@ class AppListPanel(
 
         val mainText = TextView(context).apply {
             text = if (letters.isEmpty()) digit else "$digit $letters"
-            textSize = 14f
-            setTextColor(Color.parseColor("#FFE8E8E8"))
+            textSize = workbenchStyle.digitTextSizeSp.toFloat()
+            setTextColor(primaryTextColor())
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2210,8 +2231,8 @@ class AppListPanel(
         if (binding.type != KeyboardKeyBindings.BindingType.NONE) {
             val labelText = TextView(context).apply {
                 text = binding.label
-                textSize = 8f
-                setTextColor(Color.parseColor("#99E8E8E8"))
+                textSize = workbenchStyle.subTextSizeSp.toFloat()
+                setTextColor(subTextColor())
                 gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2385,16 +2406,37 @@ class AppListPanel(
             setTextColor(Color.parseColor("#FFE8E8E8"))
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
-                setMargins(2.dpToPx(), 0, 2.dpToPx(), 0)
+                setMargins(workbenchStyle.keyGapDp.dpToPx(), 0, workbenchStyle.keyGapDp.dpToPx(), 0)
             }
-            background = createMacKeyBackground()
+            background = createKeycapBackground()
             setOnClickListener { handleT9Input(key.label) }
         }
     }
 
-    private fun createMacKeyBackground(): android.graphics.drawable.Drawable {
-        return ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(context, 8f, 3f)
+    private fun createKeycapBackground(): android.graphics.drawable.Drawable {
+        return keycapState?.newDrawable()?.mutate() ?: createMacKeyBackground()
     }
+
+    private fun createMacKeyBackground(): android.graphics.drawable.Drawable {
+        return ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(
+            context = context,
+            cornerDp = workbenchStyle.keycapCornerDp.toFloat(),
+            depthDp = workbenchStyle.keycapDepthDp.toFloat(),
+            baseColor = WorkbenchStyle.colorOf(workbenchStyle.keyPressedTopColor),
+            topColor = WorkbenchStyle.colorOf(workbenchStyle.keyTopColor),
+            bottomColor = WorkbenchStyle.colorOf(workbenchStyle.keyBottomColor),
+            pressedTopColor = WorkbenchStyle.colorOf(workbenchStyle.keyPressedTopColor),
+            pressedBottomColor = WorkbenchStyle.colorOf(workbenchStyle.keyPressedBottomColor),
+            frameVisible = workbenchStyle.keycapFrameEnabled,
+            frameImage = keycapFrameImage,
+            frameAlpha = workbenchStyle.keycapFrameAlpha * 255 / 100,
+            image = keycapImage
+        )
+    }
+
+    private fun primaryTextColor(): Int = WorkbenchStyle.colorOf(workbenchStyle.primaryTextColor)
+
+    private fun subTextColor(): Int = WorkbenchStyle.colorOf(workbenchStyle.subTextColor)
 
     private fun handleT9Input(digit: String) {
         t9Input.append(digit)

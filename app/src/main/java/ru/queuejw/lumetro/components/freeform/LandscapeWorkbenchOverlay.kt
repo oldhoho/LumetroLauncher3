@@ -39,6 +39,7 @@ class LandscapeWorkbenchOverlay(
     private val coroutineScope = manager.getCoroutineScope()
     private val iconLoader: IconLoader? = manager.getIconLoader()
     private val iconCache: MutableMap<String, Bitmap> = manager.getIconCache()
+    private val style = WorkbenchStyle(context)
     private val handler = Handler(Looper.getMainLooper())
     
     private var isShowing = false
@@ -182,7 +183,9 @@ class LandscapeWorkbenchOverlay(
         
         val rootLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#FF1A1A1A"))
+            background = StyleImageStore.background(
+                context, StyleImageStore.WORKBENCH, style.workbenchAlpha
+            ) ?: android.graphics.drawable.ColorDrawable(style.workbenchBackground)
         }
         
         val listScrollView = ScrollView(context).apply {
@@ -516,6 +519,10 @@ private fun handleLockTouch(event: MotionEvent) {
         appListParams = null
         appListContainerRef = null
         isAppListShowing = false
+
+        // 释放旧的键盘视图，下次打开时按当前外观设置重建
+        appListPanel?.clearResources()
+        appListPanel = null
     }
     
     fun cleanup() {

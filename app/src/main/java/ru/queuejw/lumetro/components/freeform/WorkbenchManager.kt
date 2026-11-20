@@ -599,6 +599,19 @@ while (isLoadingApps && retryCount < 10) {
         workbenchOverlayRef?.get()?.hideAppsList()
     }
 
+    /** 重建九键视图（外观设置变更后） */
+    fun rebuildAppList() {
+        workbenchOverlayRef?.get()?.invalidateAppListCache()
+    }
+
+    /** 重建工作条（外观设置变更后），仅在工作台原本可见时重新显示 */
+    fun refreshWorkbenchAppearance() {
+        val overlay = workbenchOverlayRef?.get() ?: return
+        val wasShowing = overlay.isShowing()
+        overlay.hide()
+        if (wasShowing) overlay.show()
+    }
+
     fun toggleAppsList() {
         workbenchOverlayRef?.get()?.toggleAppsList()
     }

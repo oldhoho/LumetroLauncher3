@@ -46,6 +46,9 @@ class ColorDialog(private val mContext: Context) : DialogFragment() {
     private var scroll: ScrollView? = null
     private var colorPicker: ColorPickerView? = null
 
+    private val initialColor: Int?
+        get() = arguments?.getInt(ARG_INITIAL_COLOR)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         setStyle(STYLE_NORMAL, R.style.Lumetro_FullScreenDialog)
         colorManager = ColorManager()
@@ -91,8 +94,9 @@ class ColorDialog(private val mContext: Context) : DialogFragment() {
 
         saveButton = view.findViewById(R.id.save_color)
         saveButton?.setOnClickListener {
-            mColor?.let { value ->
-                parentFragmentManager.setFragmentResult("color", bundleOf("color_value" to value))
+            val value = mColor ?: initialColor?.let { String.format("#%06X", it and 0xFFFFFF) }
+            value?.let { v ->
+                parentFragmentManager.setFragmentResult("color", bundleOf("color_value" to v))
             }
             dismiss()
         }
@@ -109,8 +113,12 @@ class ColorDialog(private val mContext: Context) : DialogFragment() {
                 }
             })
         }.also {
-            it?.setInitialColor(prefs.accentColorValue.toColorInt())
+            it?.setInitialColor(initialColor ?: prefs.accentColorValue.toColorInt())
         }
+    }
+
+    companion object {
+        const val ARG_INITIAL_COLOR = "initial_color"
     }
 
     private fun setOnClick(colorView: View, colorValue: Int) {

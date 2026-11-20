@@ -60,6 +60,7 @@ class WorkbenchOverlay(
     private var iconLoader: IconLoader? = manager.getIconLoader()
     private val iconCache: MutableMap<String, Bitmap> = manager.getIconCache()
     private val settings = manager.getSettings()
+    private val style = WorkbenchStyle(context)
     private val prefs = context.getSharedPreferences("workbench", Context.MODE_PRIVATE)
 
     // ========== dpToPx 扩展函数（类级别，全局可用） ==========
@@ -112,6 +113,8 @@ private fun perfLog(message: String) {
 
     private var isAppsPanelShowing = false
     private var landscapeOverlay: LandscapeWorkbenchOverlay? = null
+
+    private val keycapStates = HashMap<Int, android.graphics.drawable.Drawable.ConstantState?>()
 
     private var touchDownX = 0f
     private var touchDownY = 0f
@@ -937,6 +940,7 @@ cachedAppsHash = apps.hashCode()
                     preCreatedAppListPanel = panel
                     preCreatedView = view
                     isAppListReady = true
+                    preheatAppListView(view)
                     val elapsed = System.currentTimeMillis() - startTime
                     perfLog("preCreateAppListPanel END: total ${elapsed}ms")
                     Log.d(TAG, "AppListPanel pre-created in ${elapsed}ms")
@@ -944,6 +948,27 @@ cachedAppsHash = apps.hashCode()
             } catch (e: Exception) {
                 perfLog("preCreateAppListPanel FAILED: ${e.message}")
                 Log.e(TAG, "Pre-create AppListPanel failed", e)
+            }
+        }
+    }
+
+    private fun preheatAppListView(view: View) {
+        val metrics = context.resources.displayMetrics
+        val width = (metrics.widthPixels * settings.appListWidthRatio.coerceIn(0.5f, 1.0f)).toInt()
+        val availableHeight = metrics.heightPixels - settings.height.dpToPx()
+        val height = (availableHeight * settings.appListHeightRatio.coerceIn(0.1f, 2.0f)).toInt()
+        if (width <= 0 || height <= 0) return
+
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (view.width != 0 || view.height != 0) return@post
+            try {
+                view.measure(
+                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+                )
+                view.layout(0, 0, width, height)
+            } catch (e: Exception) {
+                Log.e(TAG, "preheatAppListView failed", e)
             }
         }
     }
@@ -1371,7 +1396,7 @@ fun showAppsList() {
             }
 
             val contentContainer = FrameLayout(context).apply {
-                setBackgroundColor(Color.BLACK)
+                setBackgroundColor(Color.TRANSPARENT)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     outlineProvider = object : android.view.ViewOutlineProvider() {
                         override fun getOutline(view: View, outline: android.graphics.Outline) {
@@ -1379,7 +1404,7 @@ fun showAppsList() {
                         }
                     }
                     clipToOutline = true
-                    elevation = 24f
+                    elevation = if (style.reduceEffects) 0f else 24f
                 }
             }
 
@@ -1396,9 +1421,6 @@ fun showAppsList() {
                 val currentApps = manager.getCachedApps()
                 cachedApps = currentApps.toMutableList()
                 cachedAppsHash = currentApps.hashCode()
-
-                preCreatedAppListPanel?.refresh(currentApps)
-                perfLog("showPreCreatedAppList: refreshed with ${currentApps.size} apps")
             }
 
             rootContainer.addView(contentContainer)
@@ -1430,6 +1452,7 @@ fun showAppsList() {
 
             rootContainer.post {
                 rootContainer.requestFocus()
+                preCreatedAppListPanel?.refresh(manager.getCachedApps())
             }
 
             val elapsed = System.currentTimeMillis() - startTime
@@ -1519,7 +1542,7 @@ if (snapFB.isEmpty()) {
             }
 
             val contentContainer = FrameLayout(context).apply {
-                setBackgroundColor(Color.BLACK)
+                setBackgroundColor(Color.TRANSPARENT)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     outlineProvider = object : android.view.ViewOutlineProvider() {
                         override fun getOutline(view: View, outline: android.graphics.Outline) {
@@ -1527,7 +1550,7 @@ if (snapFB.isEmpty()) {
                         }
                     }
                     clipToOutline = true
-                    elevation = 24f
+                    elevation = if (style.reduceEffects) 0f else 24f
                 }
             }
 
@@ -1649,6 +1672,7 @@ if (snapFB.isEmpty()) {
 
             rootContainer.post {
                 rootContainer.requestFocus()
+                preCreatedAppListPanel?.refresh(manager.getCachedApps())
             }
 
             val elapsed = System.currentTimeMillis() - startTime
@@ -1687,6 +1711,17 @@ if (snapFB.isEmpty()) {
         isAppsPanelShowing = false
     }
 
+    /** 外观设置变更后丢弃旧的九键视图并重新预创建 */
+    fun invalidateAppListCache() {
+        hideAppsList()
+        preCreateJob?.cancel()
+        preCreatedAppListPanel?.clearResources()
+        preCreatedAppListPanel = null
+        preCreatedView = null
+        isAppListReady = false
+        preCreateAppListPanel()
+    }
+
     fun toggleAppsList() {
         if (isAppsPanelShowing) {
             hideAppsList()
@@ -1709,6 +1744,7 @@ if (snapFB.isEmpty()) {
     private fun createWorkbenchView(screenWidth: Int): FrameLayout {
         val workbenchHeight = settings.height.dpToPx()
         barHeight = workbenchHeight
+        keycapStates.clear()
 
         val container = GestureContainer(context,
             onHomeGesture = { performHome() },
@@ -1719,16 +1755,24 @@ if (snapFB.isEmpty()) {
                 showAppsList()
             }
         ).apply {
-            setBackgroundColor(Color.parseColor("#FF1A1A1A"))
+            background = StyleImageStore.background(
+                context, StyleImageStore.WORKBENCH, style.workbenchAlpha
+            ) ?: android.graphics.drawable.ColorDrawable(style.workbenchBackground)
+            val radius = style.workbenchCornerDp.dpToPx().toFloat()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: android.graphics.Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, radius)
+                    }
+                }
                 clipToOutline = true
-                elevation = 12f
+                elevation = if (style.reduceEffects) 0f else 12f
             }
         }
 
         val glowLine = View(context).apply {
-            setBackgroundColor(Color.parseColor("#33FFFFFF"))
+            setBackgroundColor(WorkbenchStyle.colorOf(style.workbenchLineColor))
+            visibility = if (style.workbenchLineVisible) View.VISIBLE else View.GONE
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 1.dpToPx()
@@ -2225,8 +2269,28 @@ private inner class GestureContainer(
 
     // ========== 添加 createAppItem 方法 ==========
     // ========== 创建应用图标 ==========
-private fun keycapBg(tint: Int? = null): android.graphics.drawable.Drawable =
-    ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(context, 12f, 3f, tint)
+private fun keycapBg(tint: Int? = null): android.graphics.drawable.Drawable {
+    val cacheKey = tint ?: 0
+    val state = keycapStates.getOrPut(cacheKey) { buildKeycapBg(tint).constantState }
+    return state?.newDrawable()?.mutate() ?: buildKeycapBg(tint)
+}
+
+private fun buildKeycapBg(tint: Int?): android.graphics.drawable.Drawable =
+    ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(
+        context = context,
+        cornerDp = 12f,
+        depthDp = 3f,
+        tint = tint,
+        baseColor = WorkbenchStyle.colorOf(style.keyPressedTopColor),
+        topColor = WorkbenchStyle.colorOf(style.keyTopColor),
+        bottomColor = WorkbenchStyle.colorOf(style.keyBottomColor),
+        pressedTopColor = WorkbenchStyle.colorOf(style.keyPressedTopColor),
+        pressedBottomColor = WorkbenchStyle.colorOf(style.keyPressedBottomColor),
+        frameVisible = style.keycapFrameEnabled,
+        frameImage = StyleImageStore.load(context, StyleImageStore.KEYCAP_FRAME),
+        frameAlpha = style.keycapFrameAlpha * 255 / 100,
+        image = StyleImageStore.load(context, StyleImageStore.KEYCAP)
+    )
 
 private fun createAppItem(packageName: String, appName: String, isForeground: Boolean, slotWidth: Int): View {
     // ========== 空白占位符处理 ==========
@@ -2389,7 +2453,7 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
     }
 
     if (packageName.isNotEmpty()) {
-        val iconSize = if (isForeground) 32.dpToPx() else 28.dpToPx()
+        val iconSize = (style.workbenchIconSizeDp + if (isForeground) 4 else 0).dpToPx()
 
         // ========== 图标容器（用于添加角标） ==========
         val iconContainer = FrameLayout(context).apply {
@@ -2415,7 +2479,7 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
                 textSize = 7f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
-                setBackgroundColor(Color.parseColor("#FF4488FF"))
+                setBackgroundColor(WorkbenchStyle.colorOf(style.badgeColor))
                 layoutParams = FrameLayout.LayoutParams(badgeSize, badgeSize).apply {
                     gravity = Gravity.TOP or Gravity.END
                 }
@@ -2427,8 +2491,8 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
 
         val nameView = TextView(context).apply {
             text = appName
-            textSize = 7f
-            setTextColor(if (isForeground) Color.WHITE else Color.parseColor("#CCFFFFFF"))
+            textSize = style.workbenchNameTextSizeSp.toFloat()
+            setTextColor(if (isForeground) Color.WHITE else WorkbenchStyle.colorOf(style.workbenchNameColor))
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2507,8 +2571,8 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
 
                 val nameView = TextView(context).apply {
                     text = "搜索"
-                    textSize = 7f
-                    setTextColor(Color.parseColor("#CCFFFFFF"))
+                    textSize = style.workbenchNameTextSizeSp.toFloat()
+                    setTextColor(WorkbenchStyle.colorOf(style.workbenchNameColor))
                     gravity = Gravity.CENTER
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,

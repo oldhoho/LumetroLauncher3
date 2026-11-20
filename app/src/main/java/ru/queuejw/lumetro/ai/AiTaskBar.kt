@@ -9,12 +9,15 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlin.math.roundToInt
+import ru.queuejw.lumetro.components.freeform.StyleImageStore
+import ru.queuejw.lumetro.components.freeform.WorkbenchStyle
 
 /**
  * 九键上方的一行 AI 栏：AI 任务状态、当前数字输入与匹配到的常用任务。
  */
 class AiTaskBar(
     context: Context,
+    private val style: WorkbenchStyle,
     private val onOpenConsole: () -> Unit,
     private val onSendTask: (AiTask) -> Unit,
 ) : LinearLayout(context) {
@@ -30,7 +33,8 @@ class AiTaskBar(
     init {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setBackgroundColor(Color.parseColor("#FF0F0F0F"))
+        background = StyleImageStore.background(context, StyleImageStore.AI_BAR, 100)
+            ?: android.graphics.drawable.ColorDrawable(WorkbenchStyle.colorOf(style.aiBarColor))
         setPadding(dp(8), dp(4), dp(4), dp(4))
         minimumHeight = dp(34)
 
@@ -39,7 +43,7 @@ class AiTaskBar(
 
         statusText.apply {
             textSize = 11f
-            setTextColor(Color.parseColor("#CCE8E8E8"))
+            setTextColor(WorkbenchStyle.colorOf(style.aiBarTextColor))
             maxLines = 1
             includeFontPadding = false
             setOnClickListener { onOpenConsole() }
