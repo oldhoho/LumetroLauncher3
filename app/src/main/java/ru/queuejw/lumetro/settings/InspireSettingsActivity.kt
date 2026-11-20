@@ -30,19 +30,46 @@ class InspireSettingsActivity : AppCompatActivity() {
         addTitle("屏幕取字设置")
 
         addSection("框选取字")
-        addSwitch("OCR 优先", KEY_OCR_PRIORITY, true)
-        addSwitch("框选后二次确认", KEY_INSPIRE_DOUBLE_CHECK, true)
-        addSwitch("截图选字层", KEY_DEFAULT_IMAGE_TEXT_OVERLAY, false)
-        addSwitch("链接雷达", KEY_SCREEN_CONTENT_LINK_RADAR, false)
+        addSwitch(
+            "OCR 优先", KEY_OCR_PRIORITY, true,
+            "框选后优先用 OCR 识别屏幕文字；关闭则先读无障碍文本，失败再走 OCR。"
+        )
+        addSwitch(
+            "框选后二次确认", KEY_INSPIRE_DOUBLE_CHECK, true,
+            "取字前先显示选区预览，确认后才开始识别，避免误选。"
+        )
+        addSwitch(
+            "截图选字层", KEY_DEFAULT_IMAGE_TEXT_OVERLAY, false,
+            "打开屏幕取字时直接进入截图选字，可在图片上点选或框选文字，不再先画选区。"
+        )
+        addSwitch(
+            "链接雷达", KEY_SCREEN_CONTENT_LINK_RADAR, false,
+            "取字时识别屏幕中的链接并显示打开提示，点击即可按链接规则跳转。"
+        )
 
         addSection("Pin 池")
-        addValueRow("显示模式", displayModeLabel(currentDisplayMode())) {
+        addValueRow(
+            "显示模式", displayModeLabel(currentDisplayMode()),
+            "决定 Pin 池以全屏还是左/右侧边栏打开；跟随触发区会按手势从哪一侧呼出。"
+        ) {
             showDisplayModeDialog()
         }
-        addSwitch("本地规则智能提取", KEY_PIN_POOL_LOCAL_RULE_EXTRACTION, false)
-        addSwitch("自动保存图片到 Pin 池", KEY_PIN_POOL_SAVE_SCREEN_CONTENT_IMAGES, true)
-        addSwitch("自动写入剪贴板", KEY_PIN_POOL_AUTO_COPY_IMAGE_TO_CLIPBOARD, false)
-        autoDeleteRow = addValueRow("定期删除", autoDeleteLabel()) { showAutoDeleteDialog() }
+        addSwitch(
+            "本地规则智能提取", KEY_PIN_POOL_LOCAL_RULE_EXTRACTION, false,
+            "用本地 OCR 和规则猜测提醒时间、图片通知标题，只在本机处理，不上传内容。"
+        )
+        addSwitch(
+            "自动保存图片到 Pin 池", KEY_PIN_POOL_SAVE_SCREEN_CONTENT_IMAGES, true,
+            "取字、图片编辑或复制图片时，同时存入 Pin 池的「自动保存」分类。"
+        )
+        addSwitch(
+            "自动写入剪贴板", KEY_PIN_POOL_AUTO_COPY_IMAGE_TO_CLIPBOARD, false,
+            "上述图片保存到 Pin 池时同时写入系统剪贴板，会覆盖剪贴板原有内容。"
+        )
+        autoDeleteRow = addValueRow(
+            "定期删除", autoDeleteLabel(),
+            "自动保存分类中未置顶的旧图片会在打开 Pin 池时清理，0 天表示不删除。"
+        ) { showAutoDeleteDialog() }
         updateAutoDeleteVisibility()
     }
 
@@ -62,7 +89,7 @@ class InspireSettingsActivity : AppCompatActivity() {
         })
     }
 
-    private fun addSwitch(title: String, key: String, default: Boolean) {
+    private fun addSwitch(title: String, key: String, default: Boolean, description: String) {
         container.addView(Switch(this).apply {
             text = title
             isChecked = settingsStore.readKey(key, default)
@@ -75,9 +102,23 @@ class InspireSettingsActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(4) }
         })
+        addDescription(description)
     }
 
-    private fun addValueRow(title: String, value: String, onClick: () -> Unit): LinearLayout {
+    private fun addDescription(text: String) {
+        container.addView(TextView(this).apply {
+            this.text = text
+            textSize = 12f
+            setPadding(0, 0, 0, dp(10))
+        })
+    }
+
+    private fun addValueRow(
+        title: String,
+        value: String,
+        description: String,
+        onClick: () -> Unit,
+    ): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(10), 0, dp(10))
@@ -94,6 +135,7 @@ class InspireSettingsActivity : AppCompatActivity() {
         }
         row.addView(valueView)
         container.addView(row)
+        addDescription(description)
         when (title) {
             "显示模式" -> modeValue = valueView
             else -> deleteValue = valueView
