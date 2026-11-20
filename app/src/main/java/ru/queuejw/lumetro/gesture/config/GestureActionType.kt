@@ -1,0 +1,26 @@
+package ru.queuejw.lumetro.gesture.config
+
+enum class GestureActionType {
+    SHOW_ACTION_VIEW,
+    CLICK_THROUGH,
+    SCREEN_CONTENT,
+    SCREEN_CONTENT_FULLSCREEN,
+    SCREEN_SEARCH,
+    SEARCH,
+    PIN_POOL,
+    POINTER,
+    KEYBOARD,
+    OPEN_APP,
+    OTHER_SHORTCUT,
+    OTHER_LINK,
+    CLIPBOARD_ACTION,
+    ACC_ACTION,
+    RECENT_APP,
+    OPEN_ACTIVITY,
+    FREEZE_APP,
+    FREEFORM_FOREGROUND,
+    OPEN_SHELL,
+    TEMP_DND,
+    PAUSE_GESTURE,
+    NONE,
+}

@@ -31,8 +31,25 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.plus
+import ru.queuejw.lumetro.gesture.GestureManager
+import ru.queuejw.lumetro.inspire.ManagedBitmap
+import ru.queuejw.lumetro.inspire.InspireFloating
 
-class SidebarAccessibilityService : AccessibilityService() {
+class SidebarAccessibilityService : AccessibilityService(), CoroutineScope {
+
+    private val serviceJob = SupervisorJob()
+    override val coroutineContext: CoroutineContext = Dispatchers.Main + serviceJob
+
+    val gestureManager: GestureManager? = null
+
+    suspend fun takeManagedScreenshot(): ManagedBitmap? =
+        takeScreenshot()?.let(ManagedBitmap::from)
 
     companion object {
         private const val TAG = "SidebarA11yService"
@@ -333,9 +350,11 @@ class SidebarAccessibilityService : AccessibilityService() {
     }
 
     fun startScreenContentSelection() {
-        screenContentController?.startSelection()
-            ?: Log.w(TAG, "Screen content controller is not ready")
+        val floating = inspireFloating ?: InspireFloating(this).also { inspireFloating = it }
+        floating.show()
     }
+
+    private var inspireFloating: InspireFloating? = null
 
     fun processClipboardText(text: String) {
         screenContentController?.processClipboardText(text)
@@ -383,6 +402,9 @@ class SidebarAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        inspireFloating?.destroy()
+        inspireFloating = null
+        serviceJob.cancel()
         super.onDestroy()
         instance = null
         screenContentController?.destroy()

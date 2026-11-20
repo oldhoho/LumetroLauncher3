@@ -27,6 +27,7 @@ internal class TokenPanelOverlay(
     private val rawText: String,
     tokens: List<String>,
     private val onDismiss: () -> Unit,
+    segments: List<IntRange>? = null,
 ) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val themedContext = ContextThemeWrapper(context, R.style.Base_Theme_MPL)
@@ -43,6 +44,20 @@ internal class TokenPanelOverlay(
     }
     private val chips = mutableListOf<TextView>()
     private val selected = BooleanArray(entries.size)
+
+    private val segmentRanges: List<IntRange> = segments
+        ?.mapNotNull { range ->
+            val start = range.first.coerceIn(0, rawText.length)
+            val end = (range.last + 1).coerceIn(0, rawText.length)
+            if (start < end) start until end else null
+        }
+        ?.ifEmpty { null }
+        ?: listOf(0 until rawText.length)
+
+    private val groups: List<List<Int>> = segmentRanges
+        .map { range -> entries.indices.filter { entries[it].text.isNotBlank() && entries[it].start in range } }
+        .filter { it.isNotEmpty() }
+        .ifEmpty { listOf(entries.indices.filter { entries[it].text.isNotBlank() }) }
     private val panel = FrameLayout(themedContext)
     private var attached = false
 
@@ -105,33 +120,53 @@ internal class TokenPanelOverlay(
             setPadding(0, dp(2), 0, dp(8))
         })
 
-        val flow = FlowLayout(themedContext)
-        entries.forEachIndexed { index, token ->
-            if (token.text.isBlank()) return@forEachIndexed
-            val chip = TextView(themedContext).apply {
-                text = token.text.trim()
-                tag = index
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                gravity = Gravity.CENTER
-                setPadding(dp(10), dp(6), dp(10), dp(6))
-                setTextColor(Color.BLACK)
-                background = chipBackground(false)
-                setOnClickListener {
-                    selected[index] = !selected[index]
-                    applyChipState(this, selected[index])
-                }
+        val tokenArea = LinearLayout(themedContext).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        groups.forEachIndexed { groupIndex, group ->
+            if (groupIndex > 0) {
+                tokenArea.addView(View(themedContext).apply {
+                    setBackgroundColor(0xFFEEEEEE.toInt())
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(1),
+                ).apply {
+                    topMargin = dp(6)
+                    bottomMargin = dp(6)
+                })
             }
-            chips += chip
-            flow.addView(chip, ViewGroup.MarginLayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                setMargins(dp(3), dp(3), dp(3), dp(3))
-            })
+            val flow = FlowLayout(themedContext)
+            group.forEach { index ->
+                val token = entries[index]
+                val chip = TextView(themedContext).apply {
+                    text = token.text.trim()
+                    tag = index
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    gravity = Gravity.CENTER
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    setTextColor(Color.BLACK)
+                    background = chipBackground(false)
+                    setOnClickListener {
+                        selected[index] = !selected[index]
+                        applyChipState(this, selected[index])
+                    }
+                }
+                chips += chip
+                flow.addView(chip, ViewGroup.MarginLayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    setMargins(dp(3), dp(3), dp(3), dp(3))
+                })
+            }
+            tokenArea.addView(flow, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
         }
 
         val scroll = ScrollView(themedContext).apply {
-            addView(flow, ViewGroup.LayoutParams(
+            addView(tokenArea, ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
@@ -171,14 +206,19 @@ internal class TokenPanelOverlay(
         }
 
     private fun copySelection() {
-        val first = selected.indexOfFirst { it }
-        val last = selected.indexOfLast { it }
-        val output = if (first < 0) {
+        val output = if (!selected.any { it }) {
             rawText
         } else {
-            val start = entries[first].start
-            val end = entries[last].end
-            rawText.substring(start.coerceIn(0, rawText.length), end.coerceIn(0, rawText.length))
+            groups.mapNotNull { group ->
+                val picked = group.filter { selected[it] }
+                if (picked.isEmpty()) {
+                    null
+                } else {
+                    val start = entries[picked.first()].start.coerceIn(0, rawText.length)
+                    val end = entries[picked.last()].end.coerceIn(0, rawText.length)
+                    rawText.substring(start, end)
+                }
+            }.joinToString("\n")
         }
         if (output.isBlank()) {
             Toast.makeText(themedContext, "没有可复制的文字", Toast.LENGTH_SHORT).show()

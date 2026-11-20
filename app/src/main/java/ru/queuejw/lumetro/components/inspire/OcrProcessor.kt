@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.util.Log
 import androidx.core.graphics.createBitmap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -23,6 +24,7 @@ data class OcrProcessingResult(
     val imageTextNodes: List<ScreenContentNode> = emptyList(),
     val imageWidth: Int = 0,
     val imageHeight: Int = 0,
+    val error: String? = null,
 )
 
 /**
@@ -47,28 +49,35 @@ object OcrProcessor {
 
     suspend fun process(originalBitmap: Bitmap): OcrProcessingResult =
         withContext(Dispatchers.Default) {
-            useMutex.withLock {
-                val ocrEngine = engine ?: initMutex.withLock {
-                    engine ?: createEngine().also { engine = it }
-                } ?: return@withLock OcrProcessingResult()
+            try {
+                useMutex.withLock {
+                    val ocrEngine = engine ?: initMutex.withLock {
+                        engine ?: createEngine().also { engine = it }
+                    } ?: return@withLock OcrProcessingResult(error = "OCR 引擎初始化失败")
 
-                val paddingPx = OCR_PADDING_DP.dp2px.toInt()
-                originalBitmap.useSoftwareBitmap { source ->
-                    val padded = createPaddedBitmap(source, paddingPx)
-                    try {
-                        val nodes = ocrEngine.process(padded)
-                            .mapNotNull { it.toSourceNode(source.width, source.height, paddingPx) }
-                            .sortedWith(NODE_POSITION_COMPARATOR)
-                        OcrProcessingResult(
-                            rawText = OcrTextFormatter.buildText(nodes),
-                            imageTextNodes = nodes,
-                            imageWidth = source.width,
-                            imageHeight = source.height,
-                        )
-                    } finally {
-                        if (!padded.isRecycled) padded.recycle()
+                    val paddingPx = OCR_PADDING_DP.dp2px.toInt()
+                    originalBitmap.useSoftwareBitmap { source ->
+                        val padded = createPaddedBitmap(source, paddingPx)
+                        try {
+                            val nodes = ocrEngine.process(padded)
+                                .mapNotNull { it.toSourceNode(source.width, source.height, paddingPx) }
+                                .sortedWith(NODE_POSITION_COMPARATOR)
+                            OcrProcessingResult(
+                                rawText = OcrTextFormatter.buildText(nodes),
+                                imageTextNodes = nodes,
+                                imageWidth = source.width,
+                                imageHeight = source.height,
+                            )
+                        } finally {
+                            if (!padded.isRecycled) padded.recycle()
+                        }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "OCR processing failed", e)
+                OcrProcessingResult(error = "OCR 识别失败：${e.javaClass.simpleName}")
             }
         }
 

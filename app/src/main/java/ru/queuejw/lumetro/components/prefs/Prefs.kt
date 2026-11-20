@@ -119,4 +119,17 @@ class Prefs(context: Context) {
     var tilesLocked: Boolean
         get() = prefs.getBoolean("tiles_locked", false)
         set(value) = prefs.edit { putBoolean("tiles_locked", value) }
+
+    // 屏幕取字（key 与原版 InspireSettings 一致，供原版屏幕内容代码读取）
+    var ocrPriority: Boolean
+        get() = prefs.getBoolean("inspire_ocr_priority", true)
+        set(value) = prefs.edit { putBoolean("inspire_ocr_priority", value) }
+
+    var screenContentDoubleCheck: Boolean
+        get() = prefs.getBoolean("key_inspire_double_check", true)
+        set(value) = prefs.edit { putBoolean("key_inspire_double_check", value) }
+
+    var screenContentImageTextSelection: Boolean
+        get() = prefs.getBoolean("key_default_image_text_overlay", false)
+        set(value) = prefs.edit { putBoolean("key_default_image_text_overlay", value) }
 }
