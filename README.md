@@ -15,9 +15,19 @@
 - 4 行九键键盘，T9 模糊搜索：拼音首字母 / 全拼 / 英文 / 中文
 - 拼音首字母分组（A-Z）+ 字母索引跳转
 - 点击启动应用；长按弹出菜单（隐藏应用、应用信息、冻结等）
-- 数字键绑定：短按走 T9 搜索，长按触发绑定（应用 / 快捷方式 / 自定义 Intent）
+- 数字键长按绑定：应用 / 快捷方式 / 自定义 Intent / 内置动作（屏幕取字、剪贴板取字、📌 Pin 池）；绑定后长按直接执行，未绑定时长按进入绑定弹窗
 - 冻结 / 未冻结列表、隐藏与黑名单管理
 - 「控制」键长按触发省电暗幕
+
+### ✂️ 取字与内容处理
+- 屏幕取字：无障碍全屏框选（或截图选字层）→ OCR / 无障碍文字 → 分词气泡面板，可点选词语复制、编辑、翻译、搜索、分享
+- 剪贴板取字：读取刚复制的文字或图片，文字直接分词，图片走 OCR；不通过框选
+- 链接雷达：框选后自动识别屏幕中的链接，点击即可按链接规则打开（支持多链接选择页）
+- 图片编辑：裁剪、涂鸦、马赛克、文字、旋转、保存与分享
+- Pin 池：把文字/图片钉在悬浮便签里，支持置顶、定时提醒、拖拽发送到其他应用；图片可悬浮显示、缩放旋转
+- 搜索：可添加多个搜索引擎，支持直达链接、分享到应用、跳转指定页面、图片分享搜索
+
+> 入口统一在工作台与九键：取字、Pin 池都可绑定到数字键长按，或从「工作台设置 → 屏幕内容与搜索」进入。系统快捷设置磁贴（QS Tile）已不再作为取字入口。
 
 ### ❄️ 应用冻结
 - 依赖 Shizuku（需单独安装）
@@ -47,6 +57,8 @@
 | 悬浮窗 (SYSTEM_ALERT_WINDOW) | 工作台 / 浮层显示 | ✅ 必须 |
 | 使用情况访问 (PACKAGE_USAGE_STATS) | 读取应用使用情况 | ✅ 必须 |
 | 应用列表 (QUERY_ALL_PACKAGES) | 枚举已安装应用 | ✅ 必须 |
+| 通知权限 (POST_NOTIFICATIONS) | Pin 池定时提醒、图片通知 | ⚠️ 提醒功能需要 |
+| 精确闹钟 (SCHEDULE_EXACT_ALARM) | Pin 池定时提醒准时触发 | ⚠️ 可选 |
 | 管理所有文件 (MANAGE_EXTERNAL_STORAGE) | 壁纸、图标包、日志 | ⚠️ Android 11+ 需要 |
 | Shizuku | 应用冻结 | ⚠️ 冻结功能需要 |
 
@@ -62,12 +74,15 @@
 - 仓库已带 GitHub Actions 工作流（`.github/workflows/build.yml`）：push 到 `main` 或手动触发即构建 APK
 
 ## 📦 安装
-1. 从 [Releases](https://github.com/oldhoho/LumetroLauncher/releases) 下载 APK，或从 Actions 运行的 Artifacts 下载最新构建
+1. 从 [Releases](https://github.com/oldhoho/LumetroLauncher3/releases) 下载 APK，或从 Actions 运行的 Artifacts 下载最新构建
 2. 安装后授予所有权限，开启无障碍服务
 3. 如需冻结功能，安装 Shizuku
 
 ## 📄 许可证
-Apache License 2.0
+GNU General Public License v3.0（GPL-3.0），完整文本见 [LICENSE.txt](LICENSE.txt)。
+
+- 原始 LumetroLauncher © queuejw，以 MIT 许可证发布；
+- 屏幕内容子系统（取字、分词、图片编辑、链接雷达、Pin 池等）派生自 [GestureEVO](https://github.com/lumiagg/GestureEVO)（GPL-3.0），因此本项目整体以 GPL-3.0 发布。
 
 ---
 **⚠️ 风险提示**：本应用需要较高权限（无障碍、悬浮窗、Shizuku），仅建议信任的用户使用。
