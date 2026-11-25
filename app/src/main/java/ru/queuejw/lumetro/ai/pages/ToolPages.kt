@@ -144,7 +144,7 @@ fun settingsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
             }
             button("测试连接") { AiConsoleClient.checkServer { ok, msg -> toast(msg) } }
         }
-        status("当前：${AiConsoleClient.serverLabel()}")
+        status("当前：" + try { AiConsoleClient.serverLabel() } catch (e: Exception) { "地址解析失败：${e.message}" })
     }
 
     section("模型与 API（写后端 config）") {
@@ -183,11 +183,15 @@ fun settingsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
         )
         fun reload() {
             AiConsoleClient.api("GET", "/api/capabilities") { resp ->
+                // 后端返回 {"caps": {...}, "defaults": {...}}，不是平铺在顶层。
+                // Web 端 loadCaps() 同样读 r.caps；缺失时回落到后端 defaults。
+                val caps = resp?.optJSONObject("caps") ?: JSONObject()
+                val defaults = resp?.optJSONObject("defaults") ?: JSONObject()
                 capBox.removeAllViews()
                 capsInfo.forEach { (key, label) ->
-                    val on = resp?.optBoolean(key, false) ?: false
+                    val on = if (caps.has(key)) caps.optBoolean(key) else defaults.optBoolean(key, true)
                     capBox.row {
-                        toggleButton(if (on) "$label · 开" else "$label · 关", on) {
+                        toggleButton(label, on) {
                             val patch = JSONObject().put(key, !on)
                             AiConsoleClient.api("POST", "/api/capabilities", patch.toString()) { r ->
                                 toast(if (r != null) "能力已更新，Web 端同步" else AiConsoleClient.apiError())
@@ -219,7 +223,8 @@ fun settingsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                 ) { toast(if (it != null) "记忆已保存，下次对话生效" else AiConsoleClient.apiError()) }
             }
         }
-        addView(memEdit)
+        // edit() 扩展函数内部已 addView，不能重复添加，否则
+        // IllegalStateException: The specified child already has a parent
     }
 
     section("启动凭证 / 原生能力") {
@@ -891,8 +896,9 @@ fun diagPage(ctx: Context, toast: ToastFn): View = root(ctx) {
             button("API 状态") { AiConsoleClient.api("GET", "/api/api-status") { showJson(ctx, toast, it) } }
             button("使用说明") {
                 AiConsoleClient.api("GET", "/api/guide") { r ->
-                    val text = r?.optString("text")?.take(8000)
-                        ?: r?.toString(2)?.take(8000) ?: "无"
+                    // 后端 /api/guide 返回结构化诊断 JSON，没有 text 字段；
+                    // optString 对缺失键返回 ""，会让原来的兜底分支永远不触发。
+                    val text = r?.toString(2)?.take(8000) ?: AiConsoleClient.apiError()
                     androidx.appcompat.app.AlertDialog.Builder(ctx)
                         .setTitle("使用说明").setMessage(text)
                         .setPositiveButton("关闭", null).show()
@@ -965,9 +971,8 @@ fun guidePage(ctx: Context, toast: ToastFn): View = root(ctx) {
     val box = TextView(ctx).apply { textSize = 11.5f; setTextColor(CodexUi.color("#FFD8DEE0")) }
     section("指南") {
         AiConsoleClient.api("GET", "/api/guide") { r ->
-            box.text = r?.optString("text")?.take(12000)
-                ?: r?.toString(2)?.take(12000)
-                ?: AiConsoleClient.apiError()
+            // 与诊断页一致：后端无 text 字段，直接渲染结构化 JSON。
+            box.text = r?.toString(2)?.take(12000) ?: AiConsoleClient.apiError()
         }
         addView(box)
     }
@@ -975,55 +980,116 @@ fun guidePage(ctx: Context, toast: ToastFn): View = root(ctx) {
 
 // ------------------------------------------------------------------ 提示词库
 
-fun promptsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
-    title("提示词与工作模式", "与 Web 端同一套工作模式、自定义配置与系统词注入")
+fun promptsPage(ctx: Context, toast: ToastFn): View {
+    var remoteConfigListener: (() -> Unit)? = null
+    val page = root(ctx) {
+    title("提示词与工作模式", "五个模式全部可自定义；系统词由模式自己携带")
+
+    // 对齐 Web 端 renderMode()：选中哪个模式就编辑哪个，五个模式的名称/说明/
+    // 推理强度/开关/携带系统词都可改，改动立即生效并保存在本机。
+    val cfgBox = TextView(ctx).apply { textSize = 11f; setTextColor(CodexUi.color("#FF9EFFB0")) }
+    val cfgArea = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+    var presets = AiConsoleClient.promptPresets().toMutableList()
+
+    fun refreshCfgText() {
+        val mode = AiConsoleClient.currentMode()
+        val c = AiConsoleClient.modeCfg()
+        val carried = if (c.prompt && c.promptId.isNotBlank())
+            presets.firstOrNull { it.id == c.promptId }?.name ?: "（预设已删除）"
+            else "（不注入）"
+        cfgBox.text = "正在编辑「${AiConsoleClient.modeLabel(mode)}」：${c.desc}\n" +
+            "推理 ${c.effort} · 思考 ${c.think} · 联网 ${c.search} · 系统词 $carried"
+    }
+
+    fun rebuildCfgArea() {
+        cfgArea.removeAllViews()
+        val mode = AiConsoleClient.currentMode()
+        val c = AiConsoleClient.modeCfg(mode)
+        fun editField(key: String, value: String, labelText: String, maxLen: Int): EditText {
+            cfgArea.label(labelText)
+            return cfgArea.edit("", value).apply {
+                filters = arrayOf(android.text.InputFilter.LengthFilter(maxLen))
+            }
+        }
+        val nameEdit = editField("name", c.name, "模式名称（显示在工作模式条上）", 12)
+        val descEdit = editField("desc", c.desc, "模式说明", 60)
+        fun commitNameDesc() {
+            val cur = AiConsoleClient.modeCfg(mode)
+            AiConsoleClient.saveModeCfg(mode, cur.copy(
+                name = nameEdit.text.toString().trim().ifBlank { AiConsoleClient.MODE_DEFAULTS[mode]!!.name },
+                desc = descEdit.text.toString().trim()
+            ))
+            refreshCfgText()
+        }
+        nameEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitNameDesc() }
+        descEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitNameDesc() }
+
+        cfgArea.label("推理强度")
+        cfgArea.segment(listOf("minimal" to "极简", "low" to "低", "medium" to "中", "high" to "高"),
+            c.effort) { effort ->
+            AiConsoleClient.saveModeCfg(mode, AiConsoleClient.modeCfg(mode).copy(effort = effort))
+            refreshCfgText()
+        }
+        cfgArea.row {
+            toggleButton("深度思考", c.think) {
+                val cur = AiConsoleClient.modeCfg(mode)
+                AiConsoleClient.saveModeCfg(mode, cur.copy(think = !cur.think)); refreshCfgText()
+            }
+            toggleButton("联网检索", c.search) {
+                val cur = AiConsoleClient.modeCfg(mode)
+                AiConsoleClient.saveModeCfg(mode, cur.copy(search = !cur.search)); refreshCfgText()
+            }
+            toggleButton("注入系统词", c.prompt) {
+                val cur = AiConsoleClient.modeCfg(mode)
+                AiConsoleClient.saveModeCfg(mode, cur.copy(prompt = !cur.prompt)); rebuildCfgArea()
+            }
+        }
+        if (c.prompt) {
+            cfgArea.label("携带系统词（该模式发送时注入）")
+            val opts = listOf("" to "（不注入）") + presets.map { it.id to it.name }
+            cfgArea.segment(opts, c.promptId) { pid ->
+                AiConsoleClient.saveModeCfg(mode, AiConsoleClient.modeCfg(mode).copy(promptId = pid))
+                refreshCfgText()
+            }
+        }
+        cfgArea.row {
+            button("恢复默认模式") {
+                CodexUi.confirm(ctx, "恢复默认模式？",
+                    "五个模式的名称、说明、推理强度、开关与系统词绑定都会还原为出厂默认；提示词预设不受影响。") {
+                    AiConsoleClient.resetModeDefs(); toast("已恢复默认模式")
+                    cfgBox.text = ""
+                    refreshCfgText()
+                }
+            }
+        }
+        refreshCfgText()
+    }
 
     section("工作模式") {
-        val modes = AiConsoleClient.MODE_DEFAULTS.keys.map {
-            it to when (it) {
-                "full" -> "全能"; "lite" -> "轻量"; "chat" -> "纯对话"
-                "device" -> "手机控制"; else -> "自定义"
-            }
-        }
+        val keys = AiConsoleClient.MODE_DEFAULTS.keys.toList()
+        val modes = keys.map { it to AiConsoleClient.modeLabel(it) }
         segment(modes, AiConsoleClient.currentMode()) { mode ->
-            AiConsoleClient.setMode(mode) { ok, msg -> toast(if (ok) "已切换：$msg" else msg) }
+            AiConsoleClient.setMode(mode) { ok, msg ->
+                toast(if (ok) "已切换：$msg" else msg)
+                if (ok) rebuildCfgArea()
+            }
         }
-        hint("纯对话 / 手机控制模式不注入系统词，避免 token 雪球。")
+        hint("内部标识固定（后端按它区分直连/技能编排/Codex）；名称、说明与全部配置都可自定义，改动立即生效。")
     }
 
-    section("自定义配置") {
-        val cfgBox = TextView(ctx).apply { textSize = 11f; setTextColor(CodexUi.color("#FF9EFFB0")) }
-        fun refreshCfg() {
-            val c = AiConsoleClient.customCfg()
-            cfgBox.text = "当前自定义：推理 ${c.effort} · 思考 ${c.think} · 联网 ${c.search} · 系统词 ${c.prompt}"
-        }
-        segment(listOf("minimal" to "极简", "low" to "低", "medium" to "中", "high" to "高"),
-            AiConsoleClient.customCfg().effort) { effort ->
-            val c = AiConsoleClient.customCfg().copy(effort = effort)
-            AiConsoleClient.saveCustomCfg(c); refreshCfg()
-        }
-        row {
-            toggleButton("思考指令", AiConsoleClient.customCfg().think) {
-                val c = AiConsoleClient.customCfg()
-                AiConsoleClient.saveCustomCfg(c.copy(think = !c.think)); refreshCfg()
-            }
-            toggleButton("联网指令", AiConsoleClient.customCfg().search) {
-                val c = AiConsoleClient.customCfg()
-                AiConsoleClient.saveCustomCfg(c.copy(search = !c.search)); refreshCfg()
-            }
-            toggleButton("注入系统词", AiConsoleClient.customCfg().prompt) {
-                val c = AiConsoleClient.customCfg()
-                AiConsoleClient.saveCustomCfg(c.copy(prompt = !c.prompt)); refreshCfg()
-            }
-        }
-        addView(cfgBox); refreshCfg()
+    section("模式配置") {
+        addView(cfgArea)
+        addView(cfgBox)
     }
+    rebuildCfgArea()
 
-    var presets = AiConsoleClient.promptPresets().toMutableList()
     var active = AiConsoleClient.activePromptId()
     val listBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
     val nameEdit = EditText(ctx)
     val textEdit = EditText(ctx)
+
+    // 预设增删改后要刷新模式配置区，否则「携带系统词」列表是旧的
+    fun syncCfgAfterPresets() { rebuildCfgArea() }
 
     fun renderEditor() {
         val p = presets.firstOrNull { it.id == active } ?: presets.firstOrNull() ?: return
@@ -1055,7 +1121,7 @@ fun promptsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                 active = id
                 AiConsoleClient.savePromptPresets(presets)
                 AiConsoleClient.setActivePromptId(id)
-                renderList(); renderEditor()
+                renderList(); renderEditor(); syncCfgAfterPresets()
             }
             button("保存") {
                 val p = presets.firstOrNull { it.id == active } ?: return@button
@@ -1063,7 +1129,7 @@ fun promptsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                     text = textEdit.text.toString())
                 presets = presets.map { if (it.id == active) updated else it }.toMutableList()
                 AiConsoleClient.savePromptPresets(presets)
-                renderList(); toast("预设已保存")
+                renderList(); syncCfgAfterPresets(); toast("预设已保存")
             }
             button("删除") {
                 if (presets.size <= 1) { toast("至少保留一个预设"); return@button }
@@ -1073,7 +1139,7 @@ fun promptsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                     active = presets.first().id
                     AiConsoleClient.savePromptPresets(presets)
                     AiConsoleClient.setActivePromptId(active)
-                    renderList(); renderEditor()
+                    renderList(); renderEditor(); syncCfgAfterPresets()
                 }
             }
         }
@@ -1088,27 +1154,20 @@ fun promptsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
         addView(nameEdit); addView(textEdit)
     }
 
-    section("发送时注入") {
+    section("注入说明") {
         val hintBox = TextView(ctx).apply { textSize = 11f; setTextColor(CodexUi.color("#FF9EFFB0")) }
         fun refreshHint() {
-            hintBox.text = when (AiConsoleClient.promptInjectMode()) {
-                "global" -> "全局：所有对话都注入当前选中预设"
-                "session" -> "本会话：只注入绑定到当前会话的预设"
-                else -> "关闭：不注入系统词"
-            }
+            val c = AiConsoleClient.modeCfg()
+            val name = AiConsoleClient.modeLabel(AiConsoleClient.currentMode())
+            hintBox.text = if (!c.prompt)
+                "当前模式「$name」未开启系统词注入（纯对话默认如此，最省 token）。在上方模式配置里勾选「注入系统词」即可开启。"
+            else if (c.promptId.isBlank())
+                "当前模式「$name」已开启注入但还没选系统词，请在上方「携带系统词」里选一份预设。"
+            else "当前模式「$name」发送时会注入系统词：${AiConsoleClient.carriedPromptName()}。同一份预设可被多个模式共用，改一处全部生效。"
         }
-        segment(listOf("off" to "关闭", "global" to "全局", "session" to "本会话"),
-            AiConsoleClient.promptInjectMode()) {
-            AiConsoleClient.setPromptInjectMode(it); refreshHint()
-        }
+        hint("系统词由当前工作模式直接携带，取消了旧版的全局/本会话两级注入。所有模式（含纯对话）都支持，只有显式勾选才注入。")
         row {
-            button("绑定到本会话") {
-                val sid = AiConsoleClient.currentSessionId()
-                if (sid.isNullOrBlank()) { toast("请先建立会话"); return@button }
-                AiConsoleClient.bindPromptToSession(sid, active)
-                refreshHint(); toast("已绑定到本会话")
-            }
-            button("复制系统词") {
+            button("复制当前系统词") {
                 val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("系统词", textEdit.text.toString()))
                 toast("已复制")
@@ -1116,4 +1175,29 @@ fun promptsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
         }
         addView(hintBox); refreshHint()
     }
+
+    // 远端（Web 端）改了模式/预设后，服务端 rev 变化会触发这里，页面即时重绘；
+    // 正在编辑名称/系统词时不重建，避免把用户正在输入的文字冲掉。
+    remoteConfigListener = {
+        val editing = nameEdit.hasFocus() || textEdit.hasFocus()
+        presets = AiConsoleClient.promptPresets().toMutableList()
+        if (!editing) rebuildCfgArea()
+        renderList()
+        if (!editing) renderEditor()
+        Unit
+    }
+    }
+    val listener = remoteConfigListener
+    if (listener != null) {
+        AiConsoleClient.addConfigListener(listener)
+        page.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                AiConsoleClient.addConfigListener(listener)
+            }
+            override fun onViewDetachedFromWindow(v: View) {
+                AiConsoleClient.removeConfigListener(listener)
+            }
+        })
+    }
+    return page
 }

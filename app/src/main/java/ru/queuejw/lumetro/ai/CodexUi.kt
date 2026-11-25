@@ -191,16 +191,29 @@ internal object CodexUi {
             addView(btn)
         }
 
-    /** 状态化按钮：开/关用不同底色，适合开关类操作 */
-    fun LinearLayout.toggleButton(label: String, on: Boolean, onClick: () -> Unit): Button =
-        compactButton(context, if (on) "$label · 开" else "$label · 关", false).also { btn ->
+    /**
+     * 状态化按钮：开/关用不同底色，适合开关类操作。
+     * 点击后立即自更新外观（乐观更新），调用方只需保存状态；异步失败时由调用方重绘。
+     */
+    fun LinearLayout.toggleButton(label: String, on: Boolean, onClick: () -> Unit): Button {
+        val btn = compactButton(context, label, false)
+        var state = on
+        fun paint(v: Boolean) {
+            btn.text = "$label · ${if (v) "开" else "关"}"
             btn.background = GradientDrawable().apply {
                 cornerRadius = dp(context, 7).toFloat()
-                setColor(color(if (on) ACCENT else "#FF444444"))
+                setColor(color(if (v) ACCENT else "#FF444444"))
             }
-            btn.setOnClickListener { onClick() }
-            addView(btn)
         }
+        btn.setOnClickListener {
+            state = !state
+            paint(state)
+            onClick()
+        }
+        addView(btn)
+        paint(on)
+        return btn
+    }
 
     fun LinearLayout.row(body: LinearLayout.() -> Unit) {
         addView(LinearLayout(context).apply {
@@ -216,35 +229,45 @@ internal object CodexUi {
 
     /**
      * 分段选择器：横向可滑，选中项高亮。用于模式、注入范围、轮询间隔等。
+     * 点击后立刻自更新高亮，无需调用方重建页面；返回 setter 供外部状态变化（如 Web 端同步）时同步。
      */
     fun LinearLayout.segment(
         options: List<Pair<String, String>>,
         selected: String,
         onSelect: (String) -> Unit
-    ) {
+    ): (String) -> Unit {
         val inner = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(context, 2), dp(context, 2), dp(context, 2), dp(context, 2))
         }
-        options.forEach { (value, label) ->
-            val on = value == selected
-            inner.addView(TextView(context).apply {
-                text = label
-                textSize = 11f
-                setTextColor(color(if (on) "#FFFFFFFF" else "#FFBBBBBB"))
-                background = GradientDrawable().apply {
+        val cells = mutableListOf<Pair<String, TextView>>()
+        fun paint(value: String) {
+            cells.forEach { (v, tv) ->
+                val on = v == value
+                tv.setTextColor(color(if (on) "#FFFFFFFF" else "#FFBBBBBB"))
+                tv.background = GradientDrawable().apply {
                     cornerRadius = dp(context, 7).toFloat()
                     setColor(color(if (on) ACCENT else "#FF1E1E1E"))
                 }
+            }
+        }
+        options.forEach { (value, label) ->
+            val tv = TextView(context).apply {
+                text = label
+                textSize = 11f
                 setPadding(dp(context, 11), dp(context, 6), dp(context, 11), dp(context, 6))
-                setOnClickListener { onSelect(value) }
-            })
+                setOnClickListener { paint(value); onSelect(value) }
+            }
+            cells += value to tv
+            inner.addView(tv)
         }
         addView(HorizontalScrollView(context).apply {
             addView(inner)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         })
+        paint(selected)
+        return ::paint
     }
 
     /** 复刻 Web 工具页的四宫格说明卡：标题 + 说明 + 一个动作按钮 */

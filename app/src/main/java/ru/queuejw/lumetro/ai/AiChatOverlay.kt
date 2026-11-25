@@ -71,6 +71,18 @@ class AiChatOverlay(
     private var autoSpeak = false
     private var autoTts: TextToSpeech? = null
     private var pendingAutoText: String? = null
+    /** 已朗读过的最后一条正文，避免同一条被本地 render 与 Web 轮询各播一次 */
+    private var lastSpokenText: String? = null
+    /** 基线所属会话：切换会话时把当前末尾回复记为已读，避免翻开旧会话就念历史 */
+    private var lastSpokenSid: String? = null
+
+    /**
+     * 手指正按在气泡上。气泡要可长按选字/复制，必须保持 focusable；
+     * 但 ACTION_DOWN 焦点转移会让输入框失焦，若此刻收键盘会触发布局跳变、
+     * 导致 ACTION_UP 点不中（"要点两下"）。因此触摸期间暂不收键盘，
+     * 由气泡点击里的 dismissKeyboard 在 UP 之后统一收起。
+     */
+    private var bubbleTouching = false
 
     private var messagesSnapshot: List<ChatMessage> = emptyList()
     /** 当前已渲染的会话 id，切换会话时强制整表重建 */
@@ -103,7 +115,15 @@ class AiChatOverlay(
 
     /** Web 端新增回复的朗读回调（Activity 模式下注册，后台也保持） */
     private val remoteAssistantListener: (String) -> Unit = { text ->
-        if (autoSpeak) speakAuto(text)
+        // 按正文去重：Web 端轮询与本地 render 不会重复播同一条
+        if (autoSpeak) speakAutoIfNew(text)
+    }
+
+    /** 跨端配置变化（工作模式名/预设）后刷新功能面板，不触发消息列表重建 */
+    private val configChangeListener: () -> Unit = {
+        post {
+            if (isAttachedToWindow && ::featMode.isInitialized) refreshFeatures()
+        }
     }
 
     /** 流式跟随节流：文字流很快，不逐 token 跳到底，按固定间隔平滑滚动，允许文字领先 */
@@ -152,6 +172,8 @@ class AiChatOverlay(
             .getBoolean("auto_speak", false)
         // Activity 模式由本层负责朗读；旧悬浮窗模式不注册，避免两个 overlay 重复播报
         if (!manageWindow) AiConsoleClient.addRemoteAssistantListener(remoteAssistantListener)
+        // 工作模式/预设在 Web 端改动后，服务端配置轮询会触发这里，功能面板即时刷新
+        AiConsoleClient.addConfigListener(configChangeListener)
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -360,8 +382,10 @@ class AiChatOverlay(
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             setOnFocusChangeListener { _, hasFocus ->
                 if (hasFocus) showKeyboardForInput()
-                else {
-                    // 失焦即收键盘：所有非输入操作只需让输入框失焦，统一在这里收起
+                else if (!bubbleTouching) {
+                    // 失焦即收键盘：所有非输入操作只需让输入框失焦，统一在这里收起。
+                    // 例外：焦点是被气泡长按/点击抢走时，先不收——否则 DOWN 阶段布局跳变
+                    // 会让 UP 点不中气泡；由气泡自己在 UP 之后调 dismissKeyboard 收。
                     val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                     imm?.hideSoftInputFromWindow(windowToken, 0)
                 }
@@ -419,7 +443,7 @@ class AiChatOverlay(
     /** 根据客户端当前模式/快速开关/待发附件刷新功能面板 */
     private fun refreshFeatures() {
         val cfg = AiConsoleClient.effectiveCfg()
-        val modeLabel = AiConsoleClient.MODE_DEFAULTS[AiConsoleClient.currentMode()]?.label.orEmpty()
+        val modeLabel = AiConsoleClient.modeLabel(AiConsoleClient.currentMode())
         featAuto.text = if (autoSpeak) "🔊 自动朗读\n开" else "🔊 自动朗读\n关"
         featSearch.text = if (cfg.search) "🌐 联网搜索\n开" else "🌐 联网搜索\n关"
         featThink.text = if (cfg.think) "🧠 深度思考\n开" else "🧠 深度思考\n关"
@@ -444,7 +468,17 @@ class AiChatOverlay(
         autoSpeak = !autoSpeak
         context.getSharedPreferences("ai_console", Context.MODE_PRIVATE)
             .edit().putBoolean("auto_speak", autoSpeak).apply()
-        if (!autoSpeak) stopAutoTts()
+        if (!autoSpeak) {
+            stopAutoTts()
+            lastSpokenText = null
+        } else {
+            // 刚打开时，把当前末尾回复当作「已播过」的基线，避免翻开旧会话就念历史
+            lastSpokenSid = AiConsoleClient.currentSessionId()
+            lastSpokenText = AiConsoleClient.messages.lastOrNull {
+                it.role == "assistant" && !it.failed && it.text.isNotBlank()
+            }?.text
+            ensureAutoTts()
+        }
         refreshFeatures()
         Toast.makeText(context, if (autoSpeak) "已开启自动朗读" else "已关闭自动朗读", Toast.LENGTH_SHORT).show()
     }
@@ -461,7 +495,7 @@ class AiChatOverlay(
     private fun showModePicker() {
         dismissKeyboard()
         val keys = AiConsoleClient.MODE_DEFAULTS.keys.toList()
-        val labels = keys.map { AiConsoleClient.MODE_DEFAULTS[it]!!.label }.toTypedArray()
+        val labels = keys.map { AiConsoleClient.modeLabel(it) }.toTypedArray()
         val checked = keys.indexOf(AiConsoleClient.currentMode()).coerceAtLeast(0)
         AlertDialog.Builder(context)
             .setTitle("工作模式")
@@ -499,25 +533,65 @@ class AiChatOverlay(
         refreshFeatures()
     }
 
+    /**
+     * 初始化本地 TTS 引擎。原实现只在第一次 speakAuto 时创建，且对初始化失败/
+     * 缺少中文语音包完全静默——开关显示已开却一点声音没有，看起来就是"没生效"。
+     * 这里把失败原因显式提示出来，并在打开开关时预热引擎。
+     */
+    private fun ensureAutoTts() {
+        if (autoTts != null) return
+        try {
+            autoTts = TextToSpeech(context.applicationContext) { status ->
+                post {
+                    if (status != TextToSpeech.SUCCESS) {
+                        Toast.makeText(context, "语音引擎初始化失败（$status），请检查系统 TTS 设置",
+                            Toast.LENGTH_LONG).show()
+                        pendingAutoText = null
+                        return@post
+                    }
+                    val ready = autoTts ?: return@post
+                    val lang = ready.setLanguage(Locale.CHINA)
+                    if (lang == TextToSpeech.LANG_MISSING_DATA ||
+                        lang == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        Toast.makeText(context, "系统缺少中文语音包，自动朗读无法使用",
+                            Toast.LENGTH_LONG).show()
+                        pendingAutoText = null
+                        return@post
+                    }
+                    pendingAutoText?.let { ready.speak(it, TextToSpeech.QUEUE_FLUSH, null, "auto") }
+                    pendingAutoText = null
+                }
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "语音引擎不可用：${e.message}", Toast.LENGTH_LONG).show()
+            pendingAutoText = null
+        }
+    }
+
+    /** 只朗读尚未播过的新回复：本地流式完成与 Web 轮询都走这里，按正文去重 */
+    private fun speakAutoIfNew(text: String) {
+        if (!autoSpeak || text.isBlank()) return
+        if (text == lastSpokenText) return
+        lastSpokenText = text
+        speakAuto(text)
+    }
+
+    /** 会话变化时把已有末尾回复设为基线：翻开旧会话不念历史，新会话空历史则基线为空 */
+    private fun syncSpokenBaseline(sid: String?) {
+        if (sid == lastSpokenSid) return
+        lastSpokenSid = sid
+        lastSpokenText = messagesSnapshot.lastOrNull {
+            it.role == "assistant" && !it.failed && it.text.isNotBlank()
+        }?.text
+    }
+
     /** 回复完成后自动朗读（本地 TTS，不上传音频） */
     private fun speakAuto(text: String) {
         if (!autoSpeak || text.isBlank()) return
         pendingAutoText = text
         val engine = autoTts
-        if (engine == null) {
-            autoTts = TextToSpeech(context.applicationContext) { status ->
-                post {
-                    if (status == TextToSpeech.SUCCESS) {
-                        val ready = autoTts ?: return@post
-                        ready.setLanguage(Locale.CHINA)
-                        pendingAutoText?.let { ready.speak(it, TextToSpeech.QUEUE_FLUSH, null, "auto") }
-                        pendingAutoText = null
-                    }
-                }
-            }
-        } else {
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "auto")
-        }
+        if (engine == null) ensureAutoTts()
+        else engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "auto")
     }
 
     private fun stopAutoTts() {
@@ -902,6 +976,7 @@ class AiChatOverlay(
     fun release() {
         AiConsoleClient.removeListener(renderListener)
         AiConsoleClient.removeRemoteAssistantListener(remoteAssistantListener)
+        AiConsoleClient.removeConfigListener(configChangeListener)
         dismissInlinePanel()
         stopAutoTts()
     }
@@ -1060,13 +1135,11 @@ class AiChatOverlay(
         // 流式输出期间不插按钮：否则关键词刚出现时 structKey 变化会整表重建，造成跳动。
         // 运行结束后状态刷新会自然触发一次重建，按钮随最终文本出现。
         if (AiConsoleClient.running || text.isBlank()) return emptyList()
-        val hints = mapOf(
-            "full" to listOf("全能模式"),
-            "lite" to listOf("轻量模式"),
-            "chat" to listOf("纯对话"),
-            "device" to listOf("手机控制"),
-            "custom" to listOf("自定义模式")
-        )
+        // 默认名 + 用户自定义名都能触发（如把自定义改名成「写周报」，回复里提到也识别）
+        val hints = AiConsoleClient.MODE_DEFAULTS.keys.associateWith { key ->
+            listOf(AiConsoleClient.modeLabel(key), AiConsoleClient.MODE_DEFAULTS[key]?.name.orEmpty())
+                .filter { it.isNotBlank() }
+        }
         val current = AiConsoleClient.currentMode()
         return AiConsoleClient.MODE_DEFAULTS.keys.filter { key ->
             key != current && hints[key]?.any { text.contains(it) } == true
@@ -1083,14 +1156,17 @@ class AiChatOverlay(
         headerSub.text = AiConsoleClient.usageHeaderText()
         refreshFeatures()
         val sidRaw = AiConsoleClient.currentSessionId()
+        syncSpokenBaseline(sidRaw)
         // 运行结束时后端 auto_title 会总结并改写会话标题，强制重拉一次让标题跟上
         val runningNow = AiConsoleClient.running
         val justFinished = headerWasRunning && !runningNow
         headerWasRunning = runningNow
-        if (justFinished && autoSpeak) {
+        if (autoSpeak && !runningNow) {
+            // 直接以"当前末尾回复正文"为准：本地刚播完、后台 Web 新增、回到前台补播都覆盖。
+            // justFinished 边缘检测在"切到别的页面再回来"时会漏事件，是开关"看起来没生效"的主因。
             messagesSnapshot.lastOrNull {
                 it.role == "assistant" && !it.failed && it.text.isNotBlank()
-            }?.let { speakAuto(it.text) }
+            }?.let { speakAutoIfNew(it.text) }
         }
         // 运行结束后才生成模式按钮；这里主动重建一次让最终文本上的按钮出现。
         if (justFinished && messagesSnapshot.any { suggestedModes(it.text).isNotEmpty() }) {
@@ -1312,12 +1388,18 @@ class AiChatOverlay(
             // 点击呼出操作卡；长按则交给系统做文字选择/复制，不再拦截。
             // 空占位（"…"）既不可点也不可选，避免误触。
             if (msg.text.isNotBlank()) {
+                // setTextIsSelectable(true) 内部会置 focusable=true，这是长按出现选择手柄
+                // 和系统「复制」菜单的前提。之前为修点击漂移强行关成 false，选字就失效了。
+                // 现在恢复焦点能力，改由 bubbleTouching 延迟收键盘来避免 UP 坐标漂移。
                 setTextIsSelectable(true)
-                // setTextIsSelectable(true) 会把气泡设为 focusable：按下时抢走输入框焦点，
-                // 键盘在同一帧收起、布局先变，UP 时点击就丢了。这里保留长按选字但关掉焦点抢占。
-                isFocusable = false
-                isFocusableInTouchMode = false
                 isClickable = true
+                setOnTouchListener { _, ev ->
+                    when (ev.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> bubbleTouching = true
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> bubbleTouching = false
+                    }
+                    false // 不消费，长按选字/点击照常交给 TextView
+                }
                 setOnClickListener { v -> showMessageActions(v, msg, index) }
             }
         }
@@ -1331,7 +1413,7 @@ class AiChatOverlay(
                 setPadding(dp(4), dp(3), dp(4), dp(2))
             }
             suggestions.forEach { key ->
-                val short = AiConsoleClient.MODE_DEFAULTS[key]?.label?.substringBefore(" · ") ?: key
+                val short = AiConsoleClient.modeLabel(key)
                 val chip = TextView(context).apply {
                     text = "⇄ 切到$short"
                     textSize = 11f

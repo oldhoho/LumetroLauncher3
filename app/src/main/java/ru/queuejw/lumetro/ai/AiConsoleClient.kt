@@ -66,12 +66,16 @@ object AiConsoleClient {
     private const val KEY_POLL_INTERVAL = "history_poll_ms"
     private const val KEY_CONTEXT_RECORD = "context_record"
     private const val KEY_CUSTOM_CFG = "custom_mode_cfg"
+    private const val KEY_MODE_DEFS = "mode_defs"
     private const val KEY_PROMPTS = "prompt_presets"
     private const val KEY_PROMPT_ACTIVE = "prompt_active"
     private const val KEY_INJECT_MODE = "prompt_inject_mode"
     private const val KEY_PROMPT_BIND = "prompt_bind"
-    /** 服务端全局配置缓存（收藏等），带 rev 乐观锁 */
+    /** 服务端全局配置缓存（收藏/工作模式/提示词），带 rev 乐观锁 */
     private const val KEY_CONFIG_CACHE = "shared_config"
+    /** /api/config 中的键，必须与 CodexWeb Web 端一致 */
+    private const val SHARED_MODE_DEFS = "modeDefs"
+    private const val SHARED_PROMPTS = "prompts"
 
     private const val MAX_STREAM_RETRY = 2
     /** Web 端发起的对话无法走本地 SSE，只能轮询会话历史来同步 */
@@ -347,6 +351,12 @@ object AiConsoleClient {
     private var configRev = 0
     private var configObj: JSONObject = JSONObject()
     private val configListeners = CopyOnWriteArrayList<() -> Unit>()
+    /** 最近一次配置同步结果，供设置/提示词页显示"已同步/失败" */
+    @Volatile
+    private var configSyncMessage: String = "未同步"
+    fun configSyncStatus(): String = configSyncMessage
+    /** 串行化配置写入，避免连续编辑触发多个同 rev 的 POST 互相 409 */
+    private val configWriteMutex = kotlinx.coroutines.sync.Mutex()
 
     /** 收藏项：与 Web 端 config.favorites 结构一致 */
     data class FavoriteItem(
@@ -392,10 +402,33 @@ object AiConsoleClient {
             val r = request("/api/config", "GET", null)
             if (r != null) {
                 applyConfig(r)
+                configSyncMessage = "已同步 · rev $configRev"
+                seedSharedConfigIfNeeded()
                 onResult?.invoke(true, "rev $configRev")
             } else {
+                configSyncMessage = "同步失败：${apiError()}"
                 onResult?.invoke(false, apiError())
             }
+        }
+    }
+
+    /**
+     * 首次接入共享配置时，把本机已有的模式/预设作为种子写入服务端一次。
+     * 服务端已有键时绝不覆盖——服务端是跨端唯一权威，本机只做离线兜底。
+     */
+    private fun seedSharedConfigIfNeeded() {
+        val patch = JSONObject()
+        if (!configObj.has(SHARED_MODE_DEFS)) {
+            patch.put(SHARED_MODE_DEFS, JSONObject().apply {
+                modeDefs().forEach { (k, v) -> put(k, v.toJson()) }
+            })
+        }
+        if (!configObj.has(SHARED_PROMPTS)) {
+            patch.put(SHARED_PROMPTS, promptPresetsJson())
+        }
+        if (patch.length() == 0) return
+        saveConfigPatch(patch) { ok, msg ->
+            configSyncMessage = if (ok) "已同步 · rev $configRev" else "同步失败：$msg"
         }
     }
 
@@ -403,6 +436,9 @@ object AiConsoleClient {
         configRev = r.optInt("rev", 0)
         val c = r.optJSONObject("config")
         configObj = c ?: JSONObject()
+        // 工作模式/提示词改走共享配置：远端 rev 变化时必须让下一读取重新解析，
+        // 不能让本机缓存把 Web 端刚改的模式名/开关盖回去。
+        modeDefsCache = null
         appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.edit()?.putString(KEY_CONFIG_CACHE, configObj.toString())?.apply()
         configListeners.forEach { runCatching { it() } }
@@ -413,27 +449,33 @@ object AiConsoleClient {
      * 把本次 patch 合并到最新 config 后重试，与 Web 端逻辑一致。
      */
     fun saveConfig(key: String, value: Any?, cb: ((Boolean, String) -> Unit)? = null) {
+        saveConfigPatch(JSONObject().put(key, if (value == null) JSONObject.NULL else value), cb)
+    }
+
+    /** 原子写入一组字段（模式定义 + 预设一起写时避免两次 rev 竞争）。串行化防止连点自冲突。 */
+    fun saveConfigPatch(patch: JSONObject, cb: ((Boolean, String) -> Unit)? = null) {
         scope.launch {
-            for (attempt in 0 until 5) {
-                val body = JSONObject()
-                    .put("base_rev", configRev)
-                    .put("config", JSONObject().apply {
-                        put(key, if (value == null) JSONObject.NULL else value)
-                    }).toString()
-                val r = request("/api/config", "POST", body, captureErrorBody = true)
-                if (r == null) {
-                    cb?.invoke(false, apiError())
-                    return@launch
-                }
-                if (r.optBoolean("conflict")) {
+            configWriteMutex.withLock {
+                for (attempt in 0 until 5) {
+                    val body = JSONObject()
+                        .put("base_rev", configRev)
+                        .put("config", patch).toString()
+                    val r = request("/api/config", "POST", body, captureErrorBody = true)
+                    if (r == null) {
+                        cb?.invoke(false, apiError())
+                        return@withLock
+                    }
+                    if (r.optBoolean("conflict")) {
+                        applyConfig(r)
+                        continue // 用服务端最新 rev/config 重试
+                    }
                     applyConfig(r)
-                    continue // 用服务端最新 rev/config 重试
+                    configSyncMessage = "已同步 · rev $configRev"
+                    cb?.invoke(true, "已同步（rev $configRev）")
+                    return@withLock
                 }
-                applyConfig(r)
-                cb?.invoke(true, "已同步（rev $configRev）")
-                return@launch
+                cb?.invoke(false, "配置并发冲突，请重试")
             }
-            cb?.invoke(false, "配置并发冲突，请重试")
         }
     }
 
@@ -589,47 +631,146 @@ object AiConsoleClient {
     fun urlEncode(s: String): String = URLEncoder.encode(s, "UTF-8")
 
     // ------------------------------------------------------------ work modes
-    // 与 CodexWeb MODE_DEFAULTS 一致。切模式时同步改 currentMode 并落盘到会话 meta。
+    // 对齐 CodexWeb v58：内部 key 固定（后端按它区分直连/技能编排/Codex），
+    // 五个模式的名称、说明、推理强度、开关与携带系统词都可编辑，保存在本机 modeDefs。
 
-    data class ModeCfg(val effort: String, val think: Boolean, val search: Boolean, val prompt: Boolean, val label: String)
+    data class ModeCfg(
+        val name: String, val desc: String, val effort: String,
+        val think: Boolean, val search: Boolean, val prompt: Boolean,
+        val promptId: String = ""
+    ) {
+        fun toJson() = JSONObject()
+            .put("name", name).put("desc", desc).put("effort", effort)
+            .put("think", think).put("search", search).put("prompt", prompt)
+            .put("promptId", promptId)
+    }
 
     val MODE_DEFAULTS = mapOf(
-        "full"   to ModeCfg("high",    true,  true,  true,  "全能模式 · 全部能力"),
-        "lite"   to ModeCfg("low",     false, false, true,  "轻量模式 · 基础工具"),
-        "chat"   to ModeCfg("minimal", false, false, false, "纯对话 · 极简直连"),
-        "device" to ModeCfg("minimal", false, false, false, "手机控制 · 技能编排"),
-        "custom" to ModeCfg("medium",  false, false, true,  "自定义模式"),
+        "full"   to ModeCfg("全能", "全部工具 + 高强度推理", "high", true, true, true),
+        "lite"   to ModeCfg("轻量", "基础工具 + 低推理", "low", false, false, true),
+        "chat"   to ModeCfg("纯对话", "极简直连 API，零系统提示/零工具，最省 Token", "minimal", false, false, false),
+        "device" to ModeCfg("手机控制", "从技能模块编排流程，不能自由操控手机", "minimal", false, false, false),
+        "custom" to ModeCfg("自定义", "自定义选项", "medium", false, false, true),
     )
+
+    private var modeDefsCache: Map<String, ModeCfg>? = null
 
     fun currentMode(): String = currentMode
 
-    /** 自定义模式的四项配置（网页端 cx.customCfg，保存在本机） */
-    fun customCfg(): ModeCfg {
-        val base = MODE_DEFAULTS["custom"]!!
-        val p = favoritesPrefs() ?: return base
-        val raw = p.getString(KEY_CUSTOM_CFG, null) ?: return base
-        return try {
-            val o = JSONObject(raw)
+    private fun parseModeDefs(obj: JSONObject): Map<String, ModeCfg> {
+        val defaults = MODE_DEFAULTS
+        return defaults.mapValues { (key, base) ->
+            val o = obj.optJSONObject(key) ?: return@mapValues base
             base.copy(
+                name = o.optString("name", base.name),
+                desc = o.optString("desc", base.desc),
                 effort = o.optString("effort", base.effort),
-                think = o.optBoolean("think", base.think),
-                search = o.optBoolean("search", base.search),
-                prompt = o.optBoolean("prompt", base.prompt)
+                think = if (o.has("think")) o.optBoolean("think") else base.think,
+                search = if (o.has("search")) o.optBoolean("search") else base.search,
+                prompt = if (o.has("prompt")) o.optBoolean("prompt") else base.prompt,
+                promptId = o.optString("promptId", base.promptId)
             )
-        } catch (e: Exception) { base }
+        }
     }
 
-    fun saveCustomCfg(cfg: ModeCfg) {
-        favoritesPrefs()?.edit()?.putString(KEY_CUSTOM_CFG, JSONObject()
-            .put("effort", cfg.effort).put("think", cfg.think)
-            .put("search", cfg.search).put("prompt", cfg.prompt).toString())?.apply()
-        notifyListeners()
+    fun modeDefsToJson(): JSONObject = JSONObject().apply {
+        modeDefs().forEach { (k, v) -> put(k, v.toJson()) }
     }
+
+    /**
+     * 五个模式的可编辑配置。优先级：服务端 /api/config.modeDefs > 本机缓存/prefs。
+     * 服务端是跨端唯一权威——Web 端改了模式名/开关，启动器下一轮轮询即可看到。
+     * 首次读取会把旧 customCfg / injectMode 迁移进来，避免升级后丢失自定义。
+     */
+    fun modeDefs(): Map<String, ModeCfg> {
+        modeDefsCache?.let { return it }
+        configObj.optJSONObject(SHARED_MODE_DEFS)?.let { server ->
+            if (server.length() > 0) {
+                val parsed = parseModeDefs(server)
+                modeDefsCache = parsed
+                return parsed
+            }
+        }
+        val defaults = MODE_DEFAULTS
+        val p = favoritesPrefs() ?: return defaults
+        val raw = p.getString(KEY_MODE_DEFS, null)
+        val result: Map<String, ModeCfg>
+        if (raw == null) {
+            val migrated = defaults.toMutableMap()
+            p.getString(KEY_CUSTOM_CFG, null)?.let { old ->
+                try {
+                    val o = JSONObject(old)
+                    val base = defaults["custom"]!!
+                    migrated["custom"] = base.copy(
+                        effort = o.optString("effort", base.effort),
+                        think = o.optBoolean("think", base.think),
+                        search = o.optBoolean("search", base.search),
+                        prompt = o.optBoolean("prompt", base.prompt)
+                    )
+                } catch (_: Exception) {}
+            }
+            // 旧版全局注入迁移：把当前激活预设绑到所有开启系统词的模式
+            val oldInject = p.getString(KEY_INJECT_MODE, "off") ?: "off"
+            val active = p.getString(KEY_PROMPT_ACTIVE, null)
+            if (oldInject != "off" && !active.isNullOrBlank()) {
+                for ((k, v) in migrated) if (v.prompt) migrated[k] = v.copy(promptId = active)
+            }
+            result = migrated
+            p.edit().putString(KEY_MODE_DEFS, JSONObject().apply {
+                migrated.forEach { (k, v) -> put(k, v.toJson()) }
+            }.toString()).apply()
+        } else {
+            result = try {
+                parseModeDefs(JSONObject(raw))
+            } catch (e: Exception) { defaults }
+        }
+        modeDefsCache = result
+        return result
+    }
+
+    /** 保存单个模式配置：本机即时生效 + 写服务端共享配置（两端同步） */
+    fun saveModeCfg(mode: String, cfg: ModeCfg, cb: ((Boolean, String) -> Unit)? = null) {
+        if (mode !in MODE_DEFAULTS) return
+        val p = favoritesPrefs() ?: return
+        val all = modeDefs().toMutableMap()
+        all[mode] = cfg
+        // 乐观更新：本机 UI 立即响应，不等待网络
+        modeDefsCache = all
+        p.edit().putString(KEY_MODE_DEFS, JSONObject().apply {
+            all.forEach { (k, v) -> put(k, v.toJson()) }
+        }.toString()).apply()
+        // 先写回本机 configObj，避免 saveConfig 返回前 configListener 用旧值把 UI 盖回去
+        configObj.put(SHARED_MODE_DEFS, JSONObject().apply {
+            all.forEach { (k, v) -> put(k, v.toJson()) }
+        })
+        notifyListeners()
+        saveConfig(SHARED_MODE_DEFS, configObj.getJSONObject(SHARED_MODE_DEFS), cb)
+    }
+
+    /** 恢复出厂默认模式（不删除提示词预设），两端同步 */
+    fun resetModeDefs(cb: ((Boolean, String) -> Unit)? = null) {
+        modeDefsCache = MODE_DEFAULTS
+        favoritesPrefs()?.edit()?.remove(KEY_MODE_DEFS)?.apply()
+        val json = JSONObject().apply { MODE_DEFAULTS.forEach { (k, v) -> put(k, v.toJson()) } }
+        configObj.put(SHARED_MODE_DEFS, json)
+        notifyListeners()
+        saveConfig(SHARED_MODE_DEFS, json, cb)
+    }
+
+    /** 兼容旧调用：自定义模式的配置 */
+    fun customCfg(): ModeCfg = modeCfg("custom")
+
+    /** 当前模式的基础配置（不含本会话快速开关），对齐 Web 端 modeCfg() */
+    fun modeCfg(mode: String = currentMode): ModeCfg =
+        modeDefs()[mode] ?: modeDefs()["custom"] ?: MODE_DEFAULTS["chat"]!!
+
+    /** 与 Web 端 modeLabel() 一致：取当前可编辑的模式名 */
+    fun modeLabel(mode: String): String =
+        modeDefs()[mode]?.name?.ifBlank { null } ?: MODE_DEFAULTS[mode]?.name ?: mode
 
     /** 与网页端 effectiveModeCfg() 对齐：本会话快速开关优先于模式预设 */
     fun effectiveCfg(): ModeCfg {
-        val base = if (currentMode == "custom") customCfg()
-                   else (MODE_DEFAULTS[currentMode] ?: MODE_DEFAULTS["chat"]!!)
+        val base = modeCfg()
         return base.copy(
             think = quickThink ?: base.think,
             search = quickSearch ?: base.search
@@ -653,23 +794,39 @@ object AiConsoleClient {
             "你是应用安全审计员。请从输入校验、认证鉴权、传输与存储四个方面审查，并按严重程度排序给出修复建议。")
     )
 
+    private fun parsePromptPresets(arr: JSONArray): List<PromptPreset> {
+        val out = mutableListOf<PromptPreset>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isNotBlank()) out.add(PromptPreset(id, o.optString("name"), o.optString("text")))
+        }
+        return if (out.isEmpty()) DEFAULT_PROMPTS else out
+    }
+
+    fun promptPresetsJson(): JSONArray = JSONArray().apply {
+        promptPresets().forEach { put(JSONObject().put("id", it.id).put("name", it.name).put("text", it.text)) }
+    }
+
+    /** 提示词预设：服务端 /api/config.prompts 优先，本机 prefs 离线兜底 */
     fun promptPresets(): List<PromptPreset> {
+        configObj.optJSONArray(SHARED_PROMPTS)?.let { arr ->
+            if (arr.length() > 0) return parsePromptPresets(arr)
+        }
         val raw = favoritesPrefs()?.getString(KEY_PROMPTS, null) ?: return DEFAULT_PROMPTS
         return try {
-            val arr = JSONArray(raw)
-            val out = mutableListOf<PromptPreset>()
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                out.add(PromptPreset(o.optString("id"), o.optString("name"), o.optString("text")))
-            }
-            if (out.isEmpty()) DEFAULT_PROMPTS else out
+            parsePromptPresets(JSONArray(raw))
         } catch (e: Exception) { DEFAULT_PROMPTS }
     }
 
-    fun savePromptPresets(list: List<PromptPreset>) {
+    /** 保存预设：本机即时生效 + 写服务端共享配置（Web 端下一轮轮询可见） */
+    fun savePromptPresets(list: List<PromptPreset>, cb: ((Boolean, String) -> Unit)? = null) {
         val arr = JSONArray()
         list.forEach { arr.put(JSONObject().put("id", it.id).put("name", it.name).put("text", it.text)) }
         favoritesPrefs()?.edit()?.putString(KEY_PROMPTS, arr.toString())?.apply()
+        configObj.put(SHARED_PROMPTS, arr)
+        notifyListeners()
+        saveConfig(SHARED_PROMPTS, arr, cb)
     }
 
     fun activePromptId(): String =
@@ -704,17 +861,21 @@ object AiConsoleClient {
         setPromptInjectMode("session")
     }
 
-    /** 与网页端 effectiveSystemPrompt() 一致，受工作模式 prompt 总闸门控制 */
+    /**
+     * 与网页端 effectiveSystemPrompt() 一致：系统词由当前模式直接携带。
+     * 所有模式（含纯对话）都支持，只有显式勾选注入并选了预设才生效。
+     */
     fun effectiveSystemPrompt(): String {
-        val cfg = if (currentMode == "custom") customCfg()
-                  else (MODE_DEFAULTS[currentMode] ?: MODE_DEFAULTS["chat"]!!)
-        if (!cfg.prompt) return ""
-        val prompt = when (promptInjectMode()) {
-            "session" -> promptPresets().firstOrNull { it.id == boundPromptId(sessionId) }
-            "global" -> promptPresets().firstOrNull { it.id == activePromptId() }
-            else -> null
-        }
-        return prompt?.text?.trim().orEmpty()
+        val cfg = modeCfg()
+        if (!cfg.prompt || cfg.promptId.isBlank()) return ""
+        return promptPresets().firstOrNull { it.id == cfg.promptId }?.text?.trim().orEmpty()
+    }
+
+    /** 当前模式携带的系统词预设名（提示用） */
+    fun carriedPromptName(): String {
+        val cfg = modeCfg()
+        if (!cfg.prompt || cfg.promptId.isBlank()) return ""
+        return promptPresets().firstOrNull { it.id == cfg.promptId }?.name.orEmpty()
     }
 
     /** 切换工作模式；网页端切预设会清空快速覆盖，这里同步清，避免旧开关污染新预设 */
@@ -731,8 +892,8 @@ object AiConsoleClient {
                 .put("think", JSONObject.NULL).put("search", JSONObject.NULL)
             api("POST", "/api/sessions/meta",
                 JSONObject().put("id", sid).put("meta", meta).toString()
-            ) { cb?.invoke(true, MODE_DEFAULTS[mode]!!.label) }
-        } else cb?.invoke(true, MODE_DEFAULTS[mode]!!.label)
+            ) { cb?.invoke(true, modeLabel(mode)) }
+        } else cb?.invoke(true, modeLabel(mode))
     }
 
     /** 直接在本地设置模式（切会话时用，避免网络往返） */
@@ -1150,13 +1311,11 @@ object AiConsoleClient {
     }
 
     /**
-     * Web 端发起的对话不走启动器的 SSE，靠轮询会话历史同步。
-     * Activity 进入前台时启动；切后台不取消，进程存活期间继续更新消息与朗读。
+     * 轮询入口：配置（模式/预设/收藏）始终轻量同步，不受"消息轮询"开关影响；
+     * 消息历史仅在开关开启时拉取。Activity 进入前台启动，切后台不取消。
      */
     fun startHistoryPolling() {
-        if (!historyPollEnabled) return
         if (historyPollJob?.isActive == true) return
-        if (sessionId.isNullOrBlank()) return
         syncSignatureFromLocal()
         historyPollJob = scope.launch {
             // 先用当前服务端状态做基线，避免刚进入会话就把历史旧消息当成 Web 新消息朗读/套用
@@ -1177,15 +1336,20 @@ object AiConsoleClient {
                 }
             }
             while (isActive) {
-                delay(historyPollIntervalMs)
-                if (!historyPollEnabled) break
-                val sid = sessionId ?: continue
+                // 关闭消息轮询时用较长间隔仍保持设置跨端同步（1.5s -> 6s）
+                delay(if (historyPollEnabled) historyPollIntervalMs else 6000L)
 
-                // 全局配置（收藏/注入模式等）：轻量 GET，rev 变化才通知 UI 刷新
+                // 全局配置（收藏/工作模式/提示词预设）：始终轮询，rev 变化才通知 UI
                 request("/api/config", "GET", null)?.let { r ->
                     val rev = r.optInt("rev", -1)
-                    if (rev >= 0 && rev != configRev) applyConfig(r)
+                    if (rev >= 0 && rev != configRev) {
+                        applyConfig(r)
+                        configSyncMessage = "已同步 · rev $configRev"
+                    }
                 }
+
+                if (!historyPollEnabled) continue
+                val sid = sessionId ?: continue
 
                 // 会话 meta（工作模式/快速开关/标题/置顶）：只套用到 UI，绝不回写，
                 // 否则会和 Web 端形成来回覆盖的死循环。
@@ -1337,9 +1501,10 @@ object AiConsoleClient {
     }
 
     /**
-     * 与 CodexWeb 前端 send() 一致的消息载荷：
-     * - chat/device 不注入系统词；chat 的 think/search 走后端真实能力（thinking + web_search）
-     * - 其余模式才把思考/联网/设备边界写进 prompt
+     * 与 CodexWeb 前端 send() 一致的消息载荷（v58）：
+     * - 系统词由当前模式直接携带，所有模式（含纯对话）都支持，显式勾选才注入
+     * - chat/device 的 think/search 走后端真实能力（thinking + web_search），只记审计说明
+     * - 其余模式把思考/联网/设备边界写进 prompt
      * - injections 只作审查记录，必须是对象（后端只保留 dict）
      */
     private fun chatPayload(sid: String, text: String): String {
@@ -1352,18 +1517,18 @@ object AiConsoleClient {
         fun audit(kind: String, detail: String) {
             injections.put(JSONObject().put("kind", kind).put("text", detail))
         }
+        // 系统词前置：由模式自身携带，所有模式生效（纯对话默认不带，用户可显式指定）
+        val sys = effectiveSystemPrompt()
+        if (sys.isNotBlank()) {
+            out = "[系统指令 / 角色设定]\n$sys\n\n[用户请求]\n$out"
+            audit("系统词 / 角色设定", sys)
+        }
         if (isPlain) {
             if (currentMode == "chat") {
                 if (cfg.think) audit("深度思考", "已启用服务端深度思考（thinking 参数），模型先推理再作答。")
                 if (cfg.search) audit("智能搜索", "已启用服务端联网搜索（deepseek_web_search 工具）。")
             }
         } else {
-            // 系统词总闸门 + 注入范围，与网页端 effectiveSystemPrompt() 对齐
-            val sys = effectiveSystemPrompt()
-            if (sys.isNotBlank()) {
-                out = "[系统指令 / 角色设定]\n$sys\n\n[用户请求]\n$out"
-                audit("系统词 / 角色设定", sys)
-            }
             if (cfg.think) { out = "[推理要求] $thinkText\n\n$out"; audit("深度思考指令", thinkText) }
             if (cfg.search) { out = "[联网要求] $searchText\n\n$out"; audit("联网检索指令", searchText) }
             val deviceHint = "【本机能力说明】本会话不能直接控制手机：不要调用 cxdevice，也不要用 adb/input/am/pm 探测安卓系统。手机操作请使用「手机控制」模式。"

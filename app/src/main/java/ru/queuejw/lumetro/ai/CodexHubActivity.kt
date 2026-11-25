@@ -155,7 +155,8 @@ class CodexHubActivity : AppCompatActivity() {
     private fun select(name: String) {
         updateSessionLabel()
         content.removeAllViews()
-        val view = when (name) {
+        val view = try {
+        when (name) {
             "对话" -> { openChat(); return }
             "终端" -> terminalPage(this, ::toast) { cmd -> runInChat(cmd, false) }
             "文件" -> filesPage(this, ::toast) {
@@ -176,6 +177,21 @@ class CodexHubActivity : AppCompatActivity() {
             "说明" -> guidePage(this, ::toast)
             "诊断" -> diagPage(this, ::toast)
             else -> diagPage(this, ::toast)
+        }
+        } catch (e: Exception) {
+            // 页面构建失败时留在工具箱并显示原因，不要静默返回对话页
+            android.util.Log.e("CodexHub", "页面构建失败: $name", e)
+            toast("「$name」加载失败：${e.message}")
+            val err = TextView(this).apply {
+                text = "「$name」加载失败\n${e.javaClass.simpleName}: ${e.message}\n\n这是页面构建错误，与 CodexWeb 连接无关。可切换标签重试；若反复出现，请把上面的异常文本反馈给开发者。"
+                textSize = 13f
+                setTextColor(CodexUi.color("#FFFF9A9A"))
+                setPadding(CodexUi.dp(this@CodexHubActivity, 12), CodexUi.dp(this@CodexHubActivity, 16),
+                    CodexUi.dp(this@CodexHubActivity, 12), CodexUi.dp(this@CodexHubActivity, 12))
+            }
+            content.addView(err, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            return
         }
         content.addView(view, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))

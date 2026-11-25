@@ -216,13 +216,13 @@ fun modePage(ctx: Context, toast: ToastFn): View = root(ctx) {
         curBox.text = "当前：$m · 推理 ${cfg.effort} · 思考 ${cfg.think} · 联网 ${cfg.search}"
     }
     section("选择模式") {
-        AiConsoleClient.MODE_DEFAULTS.forEach { (mode, cfg) ->
+        AiConsoleClient.MODE_DEFAULTS.keys.forEach { mode ->
             row {
-                button(mode) {
+                button(AiConsoleClient.modeLabel(mode)) {
                     AiConsoleClient.setMode(mode) { ok, msg -> toast(if (ok) "已切换：$msg" else msg); refresh() }
                 }
                 addView(TextView(ctx).apply {
-                    text = cfg.label
+                    text = AiConsoleClient.modeCfg(mode).desc
                     textSize = 11f; setTextColor(CodexUi.color("#FFCCCCCC"))
                 })
             }
@@ -237,7 +237,7 @@ fun modePage(ctx: Context, toast: ToastFn): View = root(ctx) {
                 AiConsoleClient.toggleQuick("search") { ok, msg -> toast(if (ok) msg else msg); refresh() }
             }
         }
-        hint("自定义模式的推理强度与系统词开关在「提示词」页调整。")
+        hint("五个模式的名称、说明与全部配置都在「提示词」页调整；系统词由模式自己携带。")
     }
     section("说明") {
         hint("全能：全部工具 + 高强度推理，能力最强但最费 token")
