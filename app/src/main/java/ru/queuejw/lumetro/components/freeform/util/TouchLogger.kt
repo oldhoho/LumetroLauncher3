@@ -1,19 +1,16 @@
 package ru.queuejw.lumetro.components.freeform.util
 
-import android.os.Environment
 import android.util.Log
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * 触摸/手势事件日志，输出到外部存储 Downloads/touch_debug.log
+ * 触摸/手势事件日志：默认关闭；开启后仅输出到 logcat，不再写外部存储。
  */
 object TouchLogger {
 
     private const val TAG = "TouchDebug"
-    private const val FILE_NAME = "touch_debug.log"
 
     @Volatile
     private var enabled: Boolean = false
@@ -22,36 +19,17 @@ object TouchLogger {
 
     fun setEnabled(value: Boolean) {
         enabled = value
-        if (value) {
-            log("=== TouchLogger enabled ===")
-        }
+        if (value) log("=== TouchLogger enabled ===")
     }
 
     fun isEnabled(): Boolean = enabled
 
     fun log(message: String) {
         if (!enabled) return
-        val time = timeFormat.format(Date())
-        val line = "[$time] $message"
-
-        Log.d(TAG, line)
-
-        try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, FILE_NAME)
-            file.appendText(line + "\n")
-        } catch (e: Exception) {
-            Log.e(TAG, "write log failed", e)
-        }
+        Log.d(TAG, "[${timeFormat.format(Date())}] $message")
     }
 
     fun clear() {
-        try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val file = File(dir, FILE_NAME)
-            if (file.exists()) file.delete()
-        } catch (e: Exception) {
-        }
+        Log.d(TAG, "TouchLogger 仅输出到 logcat，无需清理文件")
     }
 }

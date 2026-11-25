@@ -29,11 +29,10 @@ import net.sourceforge.pinyin4j.format.HanyuPinyinCaseType
 import net.sourceforge.pinyin4j.format.HanyuPinyinOutputFormat
 import net.sourceforge.pinyin4j.format.HanyuPinyinToneType
 import net.sourceforge.pinyin4j.format.HanyuPinyinVCharType
+import ru.queuejw.lumetro.ai.AiChatOverlay
 import ru.queuejw.lumetro.ai.AiConsoleActivity
 import ru.queuejw.lumetro.ai.AiConsoleClient
-import ru.queuejw.lumetro.ai.AiTask
 import ru.queuejw.lumetro.ai.AiTaskBar
-import ru.queuejw.lumetro.ai.AiTasks
 import ru.queuejw.lumetro.actions.ClipboardContentActivity
 import ru.queuejw.lumetro.gesture.TriggerSide
 import ru.queuejw.lumetro.pin.PinPoolFloating
@@ -125,6 +124,7 @@ class AppListPanel(
 
     private var t9Input = StringBuilder()
     private var aiTaskBar: AiTaskBar? = null
+    private var aiChatOverlay: AiChatOverlay? = null
     private var isT9Mode = false
 
     private val clearHandler = Handler(Looper.getMainLooper())
@@ -482,11 +482,21 @@ class AppListPanel(
     }
 
     fun createView(): View {
-        val rootContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+        // 外层 FrameLayout：内层键盘面板 + 覆盖其上的 AI 会话浮层
+        val outer = FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            isClickable = true
+            isFocusable = true
+        }
+
+        val rootContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
             background = StyleImageStore.background(
                 context, StyleImageStore.KEYBOARD_PANEL, workbenchStyle.keyboardPanelAlpha
@@ -500,8 +510,8 @@ class AppListPanel(
         aiTaskBar = AiTaskBar(
             context = context,
             style = workbenchStyle,
-            onOpenConsole = { openAiConsole() },
-            onSendTask = { sendAiTask(it) },
+            onExpand = { expandAiChat() },
+            onSendText = { sendAiText(it) },
         )
         if (workbenchStyle.aiBarVisible) {
             rootContainer.addView(
@@ -515,9 +525,13 @@ class AppListPanel(
 
         val keyboardContainer = createKeyboardView()
         rootContainer.addView(keyboardContainer)
+        outer.addView(rootContainer)
 
-        updateAiBar()
-        return rootContainer
+        // AI 对话浮层改为独立 WindowManager 窗口（由 AiChatOverlay 自行 add/remove），
+        // 不再作为九键面板容器的子 View，避免受九键窗口尺寸/flags 限制。
+        aiChatOverlay = AiChatOverlay(context)
+
+        return outer
     }
 
     private fun createKeyboardView(): View {
@@ -855,22 +869,6 @@ class AppListPanel(
             }
         }
         buttonRow.addView(addCustomBtn)
-
-        val aiTaskBtn = TextView(context).apply {
-            text = "AI 任务"
-            textSize = 13f
-            setTextColor(Color.parseColor("#FFCC88FF"))
-            gravity = Gravity.CENTER
-            setPadding(8.dpToPx(), 12.dpToPx(), 8.dpToPx(), 12.dpToPx())
-            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(4.dpToPx(), 0, 4.dpToPx(), 0)
-            }
-            setOnClickListener {
-                showAiTaskPicker(holder)
-            }
-        }
-        buttonRow.addView(aiTaskBtn)
 
         val clearAllBtn = TextView(context).apply {
             text = "清除全部"
@@ -1285,196 +1283,6 @@ class AppListPanel(
             }
         }
         contentLayout.addView(cancelBtn)
-
-        holder.addView(contentLayout)
-    }
-
-    private fun showAiTaskPicker(holder: FrameLayout) {
-        holder.removeAllViews()
-
-        val contentLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#FF1A1A1A"))
-            setPadding(16.dpToPx(), 16.dpToPx(), 16.dpToPx(), 16.dpToPx())
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-
-        contentLayout.addView(TextView(context).apply {
-            text = "选择常用 AI 任务"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 16.dpToPx())
-        })
-
-        val tasks = AiTasks.all(context)
-        val scrollView = ScrollView(context).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        }
-        val listContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
-        if (tasks.isEmpty()) {
-            listContainer.addView(TextView(context).apply {
-                text = "还没有常用任务，先在 AI 页添加"
-                textSize = 13f
-                setTextColor(Color.parseColor("#99FFFFFF"))
-                gravity = Gravity.CENTER
-                setPadding(0, 24.dpToPx(), 0, 24.dpToPx())
-            })
-        } else {
-            for (task in tasks) {
-                listContainer.addView(TextView(context).apply {
-                    text = task.text
-                    textSize = 14f
-                    maxLines = 2
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setTextColor(Color.WHITE)
-                    setPadding(16.dpToPx(), 14.dpToPx(), 16.dpToPx(), 14.dpToPx())
-                    setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-                    isClickable = true
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { bottomMargin = 6.dpToPx() }
-                    setOnClickListener { showDigitPickerForAiTask(holder, task) }
-                })
-            }
-        }
-
-        scrollView.addView(listContainer)
-        contentLayout.addView(scrollView)
-
-        val consoleBtn = TextView(context).apply {
-            text = "打开 AI 页编辑任务"
-            textSize = 14f
-            setTextColor(Color.parseColor("#FF88CCFF"))
-            gravity = Gravity.CENTER
-            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
-            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 12.dpToPx() }
-            setOnClickListener {
-                dismissBindingsDialog()
-                openAiConsole()
-            }
-        }
-        contentLayout.addView(consoleBtn)
-
-        val cancelBtn = TextView(context).apply {
-            text = "取消"
-            textSize = 14f
-            setTextColor(Color.GRAY)
-            gravity = Gravity.CENTER
-            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
-            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 8.dpToPx() }
-            setOnClickListener {
-                showBindingsListView(holder, bindingsListSnapshot)
-            }
-        }
-        contentLayout.addView(cancelBtn)
-
-        holder.addView(contentLayout)
-    }
-
-    private fun showDigitPickerForAiTask(holder: FrameLayout, task: AiTask) {
-        holder.removeAllViews()
-
-        val contentLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#FF1A1A1A"))
-            setPadding(16.dpToPx(), 16.dpToPx(), 16.dpToPx(), 16.dpToPx())
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-
-        contentLayout.addView(TextView(context).apply {
-            text = "选择要绑定「${task.label}」的数字键"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 16.dpToPx())
-        })
-
-        val scrollView = ScrollView(context).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        }
-        val listContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
-        for (d in 0..9) {
-            val digitStr = d.toString()
-            val existing = keyBindings.getBinding(digitStr)
-            val statusText = if (existing.type != KeyboardKeyBindings.BindingType.NONE) {
-                "（已绑定：${existing.label}）"
-            } else ""
-
-            listContainer.addView(TextView(context).apply {
-                text = "$digitStr 键  $statusText"
-                textSize = 15f
-                setTextColor(Color.WHITE)
-                setPadding(16.dpToPx(), 14.dpToPx(), 16.dpToPx(), 14.dpToPx())
-                setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-                isClickable = true
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = 6.dpToPx() }
-                setOnClickListener {
-                    keyBindings.setBinding(
-                        digitStr,
-                        KeyboardKeyBindings.Binding(
-                            type = KeyboardKeyBindings.BindingType.AI_TASK,
-                            value = task.id,
-                            label = task.label
-                        )
-                    )
-                    Toast.makeText(context, "$digitStr 键已绑定：${task.label}", Toast.LENGTH_SHORT).show()
-                    bindingsListSnapshot = keyBindings.getAllBindings()
-                    showBindingsListView(holder, bindingsListSnapshot)
-                }
-            })
-        }
-
-        scrollView.addView(listContainer)
-        contentLayout.addView(scrollView)
-
-        contentLayout.addView(TextView(context).apply {
-            text = "取消"
-            textSize = 14f
-            setTextColor(Color.GRAY)
-            gravity = Gravity.CENTER
-            setPadding(16.dpToPx(), 12.dpToPx(), 16.dpToPx(), 12.dpToPx())
-            setBackgroundColor(Color.parseColor("#FF2A2A2A"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 12.dpToPx() }
-            setOnClickListener {
-                showAiTaskPicker(holder)
-            }
-        })
 
         holder.addView(contentLayout)
     }
@@ -2323,12 +2131,8 @@ class AppListPanel(
             }
 
             KeyboardKeyBindings.BindingType.AI_TASK -> {
-                val task = AiTasks.find(context, binding.value)
-                if (task == null) {
-                    Toast.makeText(context, "任务已删除，请重新绑定", Toast.LENGTH_SHORT).show()
-                } else {
-                    sendAiTask(task)
-                }
+                // 常用任务已下线，AI 改为会话输入
+                Toast.makeText(context, "AI 任务已改为会话输入，请点上方输入条使用", Toast.LENGTH_SHORT).show()
             }
 
             KeyboardKeyBindings.BindingType.BUILTIN -> {
@@ -2370,33 +2174,53 @@ class AppListPanel(
         }
     }
 
-    private fun updateAiBar() {
-        val input = t9Input.toString()
-        aiTaskBar?.setInput(input, AiTasks.match(context, input))
-    }
-
-    private fun openAiConsole() {
-        try {
-            context.startActivity(
-                Intent(context, AiConsoleActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-            onHidePanel()
-        } catch (e: Exception) {
-            Toast.makeText(context, "无法打开 AI 页", Toast.LENGTH_SHORT).show()
+    /**
+     * 展开会话浮层前，把九键窗口里所有可能持有 IME 焦点的输入框释放掉。
+     * 否则输入法仍绑定在九键面板上，新独立窗口拿不到 IME token（键盘不弹），
+     * 而且点击 AI 窗会先被底层窗口当成外部点击，把整个工作台收起。
+     */
+    private fun prepareForAiChat() {
+        aiTaskBar?.releaseFocus()
+        searchEditTextRef?.get()?.let { search ->
+            search.clearFocus()
+            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as? android.view.inputmethod.InputMethodManager
+            imm?.hideSoftInputFromWindow(search.windowToken, 0)
         }
+        clearT9Input()
     }
 
-    private fun sendAiTask(task: AiTask) {
+    /**
+     * 打开独立会话页（回退到 Activity 窗口）。
+     * 悬浮窗方案在这台 ROM 上既拿不到 IME token，触摸又被更高层的工作台窗口
+     * 拦截（表现为点窗内就整体消失），所以改由 Activity 承载对话。
+     * 只收起九键面板（应用列表窗口）；工作台 dock 保持常驻，会话页底部
+     * 按 dock 实际高度避让，不重叠也不留多余空白。
+     */
+    private fun openAiConsole(prefill: String? = null) {
+        prepareForAiChat()
+        // 九键面板（含 AI 栏本身）要收起；工作台 dock 保留在会话页上。
+        onHidePanel?.invoke()
+        val intent = Intent(context.applicationContext, AiConsoleActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (!prefill.isNullOrEmpty()) putExtra(AiConsoleActivity.EXTRA_PREFILL, prefill)
+        }
+        runCatching { context.applicationContext.startActivity(intent) }
+    }
+
+    /** 展开会话页；若会话已建立则拉取权威历史 */
+    private fun expandAiChat() {
         AiConsoleClient.init(context)
-        AiConsoleClient.sendTask(task.text) { ok, msg ->
-            Toast.makeText(
-                context,
-                if (ok) "已发送：${task.label}" else msg,
-                Toast.LENGTH_SHORT
-            ).show()
+        openAiConsole()
+        if (AiConsoleClient.messages.isEmpty()) {
+            AiConsoleClient.refreshHistory()
         }
-        onHidePanel()
+    }
+
+    /** 从输入条直接发送一条消息，并打开会话页查看回复 */
+    private fun sendAiText(text: String) {
+        AiConsoleClient.init(context)
+        openAiConsole(text)
     }
 
     private fun createKeyButton(key: KeyData): View {
@@ -2444,7 +2268,6 @@ class AppListPanel(
         val input = t9Input.toString()
         searchEditTextRef?.get()?.text = input
         filterAppsByT9(input)
-        updateAiBar()
     }
 
     private fun handleBackspace() {
@@ -2459,7 +2282,6 @@ class AppListPanel(
             } else {
                 filterAppsByT9(input)
             }
-            updateAiBar()
         }
     }
 
@@ -2475,7 +2297,6 @@ class AppListPanel(
                     onAppsChanged(visibleApps.sortedBy { it.mName })
                 }
                 stopContinuousClear()
-                updateAiBar()
             }
         }
         clearRunnable = runnable
@@ -2495,12 +2316,13 @@ class AppListPanel(
         searchEditTextRef?.get()?.text = ""
         val visibleApps = getVisibleApps()
         onAppsChanged(visibleApps.sortedBy { it.mName })
-        updateAiBar()
     }
 
     fun clearSearch() {
         clearT9Input()
         searchEditTextRef?.get()?.text = ""
+        // 面板收起时关闭 AI 对话独立窗口，避免浮层残留在桌面上
+        if (aiChatOverlay?.isVisible() == true) aiChatOverlay?.hide()
     }
 
     private fun showFrozenApps() {
@@ -2619,6 +2441,7 @@ class AppListPanel(
     }
 
     fun clearResources() {
+        aiChatOverlay?.hide()
         searchHandler.removeCallbacksAndMessages(null)
         searchRunnable = null
         loadIconJob?.cancel()

@@ -157,7 +157,7 @@ private fun checkAppListPermission() {
 }
 
     // ========== 性能日志 ==========
-    private val perfLogEnabled = true
+    private val perfLogEnabled = false   // 默认关闭：不再向外部存储写性能日志
     
     private fun perfLog(message: String) {
         if (!perfLogEnabled) return
@@ -165,14 +165,7 @@ private fun checkAppListPermission() {
         val logMessage = "[$timestamp] [WorkbenchManager] $message"
         Log.d("WorkbenchManager_Perf", logMessage)
         
-        try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "workbench_performance_log.txt")
-            file.appendText("$logMessage\n")
-        } catch (e: Exception) {
-            // 忽略
-        }
+        // 日志仅保留在 logcat；不再写入公共 Downloads
     }
 
     // ========== 核心组件 ==========

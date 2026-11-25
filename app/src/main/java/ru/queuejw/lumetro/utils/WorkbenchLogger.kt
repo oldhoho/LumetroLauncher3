@@ -1,106 +1,73 @@
 package ru.queuejw.lumetro.utils
 
 import android.content.Context
-import android.os.Environment
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * 工作台日志：默认关闭。开启后写入应用私有 filesDir/logs，带 1MB 上限。
+ * 不再写公共 Downloads，避免分区存储下静默失败和跨应用可读。
+ */
 object WorkbenchLogger {
     private const val LOG_FILE_NAME = "workbench_log.txt"
     private const val MAX_LOG_SIZE = 1024 * 1024
-    
+
     private var logFile: File? = null
-    private var isEnabled = true
-    
+    private var isEnabled = false
+
     fun init(context: Context) {
         try {
-            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (downloadDir != null && (downloadDir.exists() || downloadDir.mkdirs())) {
-                logFile = File(downloadDir, LOG_FILE_NAME)
-            } else {
-                val externalDir = context.getExternalFilesDir(null)
-                if (externalDir != null) {
-                    logFile = File(externalDir, LOG_FILE_NAME)
-                } else {
-                    logFile = File(context.filesDir, LOG_FILE_NAME)
-                }
-            }
-            
-            if (logFile?.exists() == true && logFile?.length() ?: 0 > MAX_LOG_SIZE) {
-                logFile?.delete()
-                logFile?.createNewFile()
-            }
-            
-            log("Logger", "=== Workbench Logger initialized ===")
-            log("Logger", "Log path: ${logFile?.absolutePath}")
+            val dir = File(context.applicationContext.filesDir, "logs")
+            if (!dir.exists()) dir.mkdirs()
+            logFile = File(dir, LOG_FILE_NAME)
         } catch (e: Exception) {
-            // 忽略
+            logFile = null
         }
     }
-    
+
     fun log(tag: String, message: String) {
         if (!isEnabled) return
+        val file = logFile ?: return
         try {
+            if (file.exists() && file.length() > MAX_LOG_SIZE) file.delete()
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-            val logLine = "[$timestamp] [$tag] $message\n"
-            
-            logFile?.let { file ->
-                FileWriter(file, true).use { writer ->
-                    writer.append(logLine)
-                    writer.flush()
-                }
+            FileWriter(file, true).use { writer ->
+                writer.append("[$timestamp] [$tag] $message\n")
             }
         } catch (e: Exception) {
-            // 忽略
+            // 日志写入失败不应影响主流程
         }
     }
-    
+
     fun logError(tag: String, message: String, throwable: Throwable? = null) {
         if (!isEnabled) return
-        try {
-            val errorMsg = if (throwable != null) {
-                "$message | Error: ${throwable.message}\n${throwable.stackTraceToString()}"
-            } else {
-                message
-            }
-            log(tag, "ERROR: $errorMsg")
-        } catch (e: Exception) {
-            // 忽略
+        val errorMsg = if (throwable != null) {
+            "$message | Error: ${throwable.message}\n${throwable.stackTraceToString()}"
+        } else {
+            message
         }
+        log(tag, "ERROR: $errorMsg")
     }
-    
+
     fun setEnabled(enabled: Boolean) {
         isEnabled = enabled
     }
-    
+
     fun getLogContent(context: Context): String {
         return try {
-            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            var file = File(downloadDir, LOG_FILE_NAME)
-            if (!file.exists()) {
-                val externalDir = context.getExternalFilesDir(null)
-                file = File(externalDir, LOG_FILE_NAME)
-            }
-            if (!file.exists()) {
-                file = File(context.filesDir, LOG_FILE_NAME)
-            }
+            val file = File(File(context.applicationContext.filesDir, "logs"), LOG_FILE_NAME)
             if (file.exists()) file.readText() else "日志文件不存在"
         } catch (e: Exception) {
             "读取日志失败: ${e.message}"
         }
     }
-    
+
     fun clearLog(context: Context) {
         try {
-            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            File(downloadDir, LOG_FILE_NAME).delete()
-            context.getExternalFilesDir(null)?.let { 
-                File(it, LOG_FILE_NAME).delete()
-            }
-            File(context.filesDir, LOG_FILE_NAME).delete()
+            File(File(context.applicationContext.filesDir, "logs"), LOG_FILE_NAME).delete()
         } catch (e: Exception) {
             // 忽略
         }

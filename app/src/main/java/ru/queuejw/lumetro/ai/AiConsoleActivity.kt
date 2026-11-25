@@ -1,201 +1,88 @@
 package ru.queuejw.lumetro.ai
 
-import android.os.Bundle
-import android.text.InputType
-import android.text.TextUtils
-import android.view.Gravity
-import android.view.View
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import ru.queuejw.lumetro.R
-import kotlin.math.roundToInt
 
 /**
- * 全屏 AI 控制台：任务输入、常用任务编辑、状态/日志/最近总结展示。
- * 所有网络与状态逻辑在 [AiConsoleClient] 中，与九键面板共用。
+ * 独立会话页。AI 栏点击后从这里进入：普通 Activity 窗口天然拥有 IME token，
+ * 系统 adjustResize 负责键盘弹出时把输入行顶上去，不受工作台悬浮窗层级干扰。
+ * 进入时只收起九键面板；工作台 dock 保持常驻，会话页底部按 dock 高度避让。
  */
 class AiConsoleActivity : AppCompatActivity() {
 
-    private lateinit var inputTask: EditText
-    private lateinit var serverInput: EditText
-    private lateinit var sendButton: Button
-    private lateinit var stateView: TextView
-    private lateinit var logView: TextView
-    private lateinit var logScroll: ScrollView
-    private lateinit var reportTime: TextView
-    private lateinit var reportSummary: TextView
-    private lateinit var taskContainer: LinearLayout
+    companion object {
+        const val EXTRA_PREFILL = "ai_prefill"
+        /** 工具箱里点「填入对话」时只填文字、不自动发送，与 Web 端一致 */
+        const val EXTRA_PREFILL_ONLY = "ai_prefill_only"
+    }
 
-    private val renderListener: () -> Unit = { render() }
+    private var overlay: AiChatOverlay? = null
+    private var pendingPrefill: String? = null
+    private var prefillOnly = false
+    private val pickFile = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        overlay?.onPickedFile(uri)
+    }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_ai_console)
-
-        inputTask = findViewById(R.id.et_ai_task)
-        serverInput = findViewById(R.id.et_ai_server)
-        sendButton = findViewById(R.id.btn_ai_send)
-        stateView = findViewById(R.id.tv_ai_state)
-        logView = findViewById(R.id.tv_ai_log)
-        logScroll = findViewById(R.id.scroll_ai_log)
-        reportTime = findViewById(R.id.tv_report_time)
-        reportSummary = findViewById(R.id.tv_report_summary)
-        taskContainer = findViewById(R.id.container_ai_tasks)
-
         AiConsoleClient.init(this)
-        serverInput.setText(AiConsoleClient.currentInputUrl())
+        pendingPrefill = intent.getStringExtra(EXTRA_PREFILL)
+        prefillOnly = intent.getBooleanExtra(EXTRA_PREFILL_ONLY, false)
+        val view = AiChatOverlay(
+            this,
+            onClose = { finish() },
+            manageWindow = false,
+            onPickFile = { pickFile.launch("*/*") },
+        )
+        overlay = view
+        setContentView(view)
 
-        findViewById<Button>(R.id.btn_ai_server_save).setOnClickListener { saveServer() }
-        sendButton.setOnClickListener { submitTask(inputTask.text.toString().trim()) }
-        findViewById<Button>(R.id.btn_ai_task_add).setOnClickListener { showTaskEditor(null) }
-
-        renderTasks()
-        render()
-        AiConsoleClient.refreshReport()
+        // 输入行紧贴会话页可用区底部（adjustResize 会在键盘弹出时自动上移整体）。
+        // 之前按 dock 高度垫 padding，反而在无键盘时留下一条固定空白，已移除。
     }
 
     override fun onResume() {
         super.onResume()
         AiConsoleClient.init(this)
-        AiConsoleClient.addListener(renderListener)
-        render()
+        overlay?.show()
+        // 启动 Web 端历史轮询；若本地任务在后台断流，这里同时重连 SSE
         AiConsoleClient.startPollingIfRunning()
+        // 无会话则自动创建、有会话则拉取历史：打开即看到内容
+        AiConsoleClient.prepareSession { ok, msg ->
+            if (!ok) Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // onCreate/onResume 阶段 showSoftInput 会被系统静默忽略（窗口还没焦点）。
+        // 这里才是 Activity 真正可交互的时机，补一次焦点和键盘请求。
+        if (hasFocus) {
+            overlay?.post {
+                overlay?.focusInputBox()
+                pendingPrefill?.let { text ->
+                    pendingPrefill = null
+                    overlay?.prefill(text)
+                    if (!prefillOnly) {
+                        AiConsoleClient.sendTask(text) { ok, msg ->
+                            if (!ok) Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onPause() {
+        // 切后台不收 UI 监听、不停 TTS、不停轮询：
+        // 朗读要播完，Web 端新消息也要继续同步，回前台才是完整状态。
         super.onPause()
-        AiConsoleClient.removeListener(renderListener)
     }
 
-    private fun render() {
-        stateView.text = "${AiConsoleClient.statusText}  ${AiConsoleClient.serverLabel()}"
-        val step = AiConsoleClient.step
-        val log = AiConsoleClient.logText
-        logView.text = buildString {
-            if (step.isNotBlank()) append(step).append("\n\n")
-            append(log)
-            val error = AiConsoleClient.lastError
-            if (log.isBlank() && !error.isNullOrBlank()) append(error)
-        }
-        logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
-        if (AiConsoleClient.summary.isNotBlank()) {
-            reportSummary.text = AiConsoleClient.summary
-            reportTime.text = AiConsoleClient.summaryTime
-        }
+    override fun onDestroy() {
+        overlay?.release()
+        AiConsoleClient.stopHistoryPolling()
+        super.onDestroy()
     }
-
-    private fun renderTasks() {
-        taskContainer.removeAllViews()
-        val tasks = AiTasks.all(this)
-        if (tasks.isEmpty()) {
-            taskContainer.addView(TextView(this).apply {
-                text = "还没有常用任务"
-                setTextColor(android.graphics.Color.parseColor("#88FFFFFF"))
-                textSize = 12f
-                setPadding(0, dp(8), 0, dp(8))
-            })
-            return
-        }
-        for (task in tasks) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(6), 0, dp(6))
-            }
-            row.addView(TextView(this).apply {
-                text = task.text
-                setTextColor(android.graphics.Color.parseColor("#DDDDDD"))
-                textSize = 12f
-                maxLines = 2
-                ellipsize = TextUtils.TruncateAt.END
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                setOnClickListener { showTaskEditor(task) }
-            })
-            row.addView(TextView(this).apply {
-                text = "编辑"
-                textSize = 11f
-                setTextColor(android.graphics.Color.parseColor("#FF88CCFF"))
-                setPadding(dp(8), dp(4), dp(8), dp(4))
-                setOnClickListener { showTaskEditor(task) }
-            })
-            row.addView(TextView(this).apply {
-                text = "删除"
-                textSize = 11f
-                setTextColor(android.graphics.Color.parseColor("#FFFF6666"))
-                setPadding(dp(8), dp(4), dp(8), dp(4))
-                setOnClickListener {
-                    AiTasks.remove(this@AiConsoleActivity, task.id)
-                    renderTasks()
-                }
-            })
-            taskContainer.addView(row)
-        }
-    }
-
-    private fun showTaskEditor(task: AiTask?) {
-        val input = EditText(this).apply {
-            setText(task?.text.orEmpty())
-            hint = "完整指令文本，例如：打开 B 站播放我收藏的歌单"
-            setHintTextColor(android.graphics.Color.parseColor("#88FFFFFF"))
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 13f
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 2
-            maxLines = 4
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-        }
-        AlertDialog.Builder(this)
-            .setTitle(if (task == null) "新建常用任务" else "编辑常用任务")
-            .setView(input)
-            .setPositiveButton("保存") { _, _ ->
-                val text = input.text.toString().trim()
-                if (text.isEmpty()) {
-                    Toast.makeText(this, "任务内容不能为空", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                if (task == null) AiTasks.add(this, text) else AiTasks.update(this, task.id, text)
-                renderTasks()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun submitTask(text: String) {
-        if (text.isEmpty()) {
-            Toast.makeText(this, "请输入任务", Toast.LENGTH_SHORT).show()
-            return
-        }
-        sendButton.isEnabled = false
-        AiConsoleClient.sendTask(text) { ok, msg ->
-            sendButton.isEnabled = true
-            if (ok) {
-                stateView.text = "AI 运行中"
-            } else {
-                stateView.text = msg
-                logView.text = msg
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    private fun saveServer() {
-        val normalized = AiConsoleClient.setServer(this, serverInput.text.toString())
-        if (normalized == null) {
-            Toast.makeText(this, "服务器地址无效", Toast.LENGTH_SHORT).show()
-            return
-        }
-        serverInput.setText(normalized)
-        AiConsoleClient.checkServer { ok, msg ->
-            stateView.text = if (ok) "连接成功：$normalized（$msg）" else "连接失败：$normalized\n$msg"
-            if (!ok) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 }

@@ -489,9 +489,8 @@ class WorkbenchSettingsActivity : AppCompatActivity() {
 
     private fun writeLog(message: String) {
         try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "workbench_settings_log.txt")
+            val file = File(filesDir, "workbench_settings_log.txt")
+            if (file.exists() && file.length() > 512L * 1024L) file.delete()
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date())
             file.appendText("[$timestamp] $message\n")
         } catch (e: Exception) {}

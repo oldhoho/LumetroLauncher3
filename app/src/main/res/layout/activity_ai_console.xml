@@ -18,7 +18,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:background="#22FFFFFF"
-            android:hint="服务器地址，如 http://127.0.0.1:8080"
+            android:hint="CodexWeb 凭证地址，如 http://127.0.0.1:8123/?cxkey=凭证"
             android:inputType="textUri"
             android:padding="10dp"
             android:singleLine="true"

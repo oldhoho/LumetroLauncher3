@@ -76,19 +76,14 @@ class WorkbenchOverlay(
     private var appMenuView: View? = null
 private var appMenuParams: WindowManager.LayoutParams? = null
     
-    private val perfLogEnabled = true   // 调试时打开
+    private val perfLogEnabled = false   // 默认关闭：调试需要时手动改为 true，仅输出 logcat
 
 private fun perfLog(message: String) {
     if (!perfLogEnabled) return
     val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date())
     val logMessage = "[$timestamp] $message"
     Log.d("WorkbenchOverlay_Perf", logMessage)
-    try {
-        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (!dir.exists()) dir.mkdirs()
-        File(dir, "dim_debug.log").appendText("$logMessage\n")
-    } catch (e: Exception) {
-    }
+    // 日志仅保留在 logcat；不再写入公共 Downloads
 }
 
     private var overlayViewRef: WeakReference<FrameLayout>? = null

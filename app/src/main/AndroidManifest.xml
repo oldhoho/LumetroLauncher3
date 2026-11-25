@@ -70,7 +70,13 @@
         <activity
             android:name=".ai.AiConsoleActivity"
             android:theme="@style/Theme.AppCompat.NoActionBar"
-            android:exported="true" />
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ai.CodexHubActivity"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:exported="false" />
 
         <activity
             android:name=".settings.SettingsActivity"

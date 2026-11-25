@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -43,14 +44,11 @@ class LeftGestureStripManager private constructor(
             }
         }
 
+        private const val LOG_ENABLED = false
+
         private fun writeLog(message: String) {
-            try {
-                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                if (!dir.exists()) dir.mkdirs()
-                val file = File(dir, "gesture_strip_log.txt")
-                val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-                file.appendText("[$timestamp] $message\n")
-            } catch (e: Exception) {}
+            if (!LOG_ENABLED) return
+            Log.d(TAG, message)
         }
     }
 
