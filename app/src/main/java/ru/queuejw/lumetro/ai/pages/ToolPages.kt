@@ -1176,16 +1176,36 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
         addView(hintBox); refreshHint()
     }
 
-    // 远端（Web 端）改了模式/预设后，服务端 rev 变化会触发这里，页面即时重绘；
-    // 正在编辑名称/系统词时不重建，避免把用户正在输入的文字冲掉。
+    // 远端（Web 端）改了模式/预设后，服务端 rev 变化会触发这里，页面即时重绘。
+    // 正在编辑名称/系统词时不立即重建（避免冲掉输入），但要记住有待套用的更新，
+    // 等焦点离开后补一次重绘——否则 rev 已被消费，UI 会永久停在旧值。
+    var remoteRefreshPending = false
+    fun applyRemoteRefresh() {
+        presets = AiConsoleClient.promptPresets().toMutableList()
+        rebuildCfgArea()
+        renderList()
+        renderEditor()
+        remoteRefreshPending = false
+    }
     remoteConfigListener = {
         val editing = nameEdit.hasFocus() || textEdit.hasFocus()
-        presets = AiConsoleClient.promptPresets().toMutableList()
-        if (!editing) rebuildCfgArea()
-        renderList()
-        if (!editing) renderEditor()
+        if (editing) {
+            remoteRefreshPending = true
+        } else {
+            applyRemoteRefresh()
+        }
         Unit
     }
+    // 焦点离开预设编辑框时，如果有未套用的远端更新，延迟到下一帧补绘，
+    // 确保 EditText 已经真正失焦、不会被随后的重建再次抢焦点。
+    val focusRestore = View.OnFocusChangeListener { _, hasFocus ->
+        if (!hasFocus && remoteRefreshPending &&
+            !nameEdit.hasFocus() && !textEdit.hasFocus()) {
+            nameEdit.post { if (remoteRefreshPending) applyRemoteRefresh() }
+        }
+    }
+    nameEdit.onFocusChangeListener = focusRestore
+    textEdit.onFocusChangeListener = focusRestore
     }
     val listener = remoteConfigListener
     if (listener != null) {
