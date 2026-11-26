@@ -39,11 +39,11 @@ private fun wrapLongTokens(s: String, chunk: Int = 48): String {
     return sb.toString()
 }
 
-/** prompt 折叠预览：先加软换行再截断，保证窄屏按行数收缩而不溢出 */
-private fun promptPreview(s: String, limit: Int): String {
-    val wrapped = wrapLongTokens(s)
-    return if (wrapped.length > limit) wrapped.take(limit) + " …（点下方展开）" else wrapped
-}
+/** prompt 折叠预览：对已 wrap 过的文本只做截断，绝不再 wrap 第二次。
+ *  二次 wrap 会让 preview 与完整的 fullPrompt 在截断内几乎一致，
+ *  展开后「看起来没变化」——这正是审查页展开看不到内容的根因之一。 */
+private fun promptPreview(s: String, limit: Int): String =
+    if (s.length > limit) s.take(limit) + "\n…（共 ${s.length} 字，点下方展开）" else s
 
 // ------------------------------------------------------------------ 会话
 
@@ -282,6 +282,139 @@ fun runPage(ctx: Context, toast: ToastFn): View = root(ctx) {
 
 // ------------------------------------------------------------------ 上下文
 
+/** 审查分区：对应 Web 端 renderReview 里的一节 revSec。 */
+private data class ReviewBlock(val title: String, val body: String)
+
+/** Web 端 events.data 一般是对象；旧记录/异常形态兜底成文本，保证不丢内容。 */
+private fun eventObj(v: Any?): org.json.JSONObject = when (v) {
+    is org.json.JSONObject -> v
+    is String -> JSONObject().put("text", v)
+    else -> JSONObject()
+}
+
+/**
+ * 把一轮审查记录拆成与 Web 端同口径的分区。
+ * 之前启动器只显示 user_input + effective_prompt，用户因此看不到注入指令、模型输出、
+ * 工具调用和原始 usage —— 服务端 /api/context 其实把这些都落在 turn 里了。
+ */
+private fun reviewBlocks(t: org.json.JSONObject): List<ReviewBlock> {
+    val out = mutableListOf<ReviewBlock>()
+    out += ReviewBlock("用户输入（原文）", t.optString("user_input").ifBlank { "（空）" })
+
+    val atts = t.optJSONArray("attachments")
+    if (atts != null && atts.length() > 0) {
+        val sb = StringBuilder()
+        for (i in 0 until atts.length()) {
+            val a = atts.optJSONObject(i) ?: continue
+            sb.append("- ").append(a.optString("name")).append(" · ")
+                .append(a.optLong("size")).append(" 字节 · ").append(a.optString("path")).append('\n')
+        }
+        out += ReviewBlock("随消息提交的附件（${atts.length()}）", sb.toString())
+    }
+
+    val inj = t.optJSONArray("injections")
+    val injSb = StringBuilder()
+    if (inj != null) for (i in 0 until inj.length()) {
+        val x = inj.optJSONObject(i) ?: continue
+        injSb.append('[').append(x.optString("kind")).append("]\n")
+            .append(x.optString("text")).append("\n\n")
+    }
+    out += ReviewBlock("注入指令（${inj?.length() ?: 0} 条）",
+        injSb.toString().ifBlank { "（未注入任何指令）" })
+
+    out += ReviewBlock("传入的 Prompt（不含 Codex 内置系统提示/工具定义）",
+        t.optString("effective_prompt").ifBlank { "（空）" })
+
+    // events 按类型分组，顺序与 Web 端一致
+    val by = linkedMapOf<String, MutableList<org.json.JSONObject>>()
+    val ev = t.optJSONArray("events")
+    if (ev != null) for (i in 0 until ev.length()) {
+        val e = ev.optJSONObject(i) ?: continue
+        by.getOrPut(e.optString("event")) { mutableListOf() }.add(eventObj(e.opt("data")))
+    }
+    fun joined(list: List<org.json.JSONObject>, f: (org.json.JSONObject) -> String) =
+        list.joinToString("\n") { f(it) }
+
+    by["message"]?.let { out += ReviewBlock("模型输出", joined(it) { d -> d.optString("text") }) }
+    by["reasoning"]?.let { arr ->
+        // 后端每帧下发累积文本；Web 端只保留"更完整的最后一版"，避免回复被重复 N 次
+        val folded = mutableListOf<String>()
+        arr.forEach { d ->
+            val s = d.optString("text")
+            if (s.isBlank()) return@forEach
+            val prev = folded.lastOrNull()
+            if (prev != null && s.startsWith(prev)) folded[folded.size - 1] = s else folded.add(s)
+        }
+        out += ReviewBlock("推理过程", folded.joinToString("\n"))
+    }
+    by["command"]?.let {
+        out += ReviewBlock("命令执行", joined(it) { d ->
+            "$ " + d.optString("command") + "\n" + d.optString("output") })
+    }
+    by["files"]?.let { out += ReviewBlock("文件变更", joined(it) { d -> d.toString(2) }) }
+    by["tool"]?.let { out += ReviewBlock("工具调用", joined(it) { d -> d.toString(2) }) }
+    by["usage"]?.let { out += ReviewBlock("原始 usage 数据", joined(it) { d -> d.toString(2) }) }
+    val res = t.optJSONObject("result")
+    if (res != null && !res.optString("error").isNullOrBlank()) {
+        out += ReviewBlock("错误", res.optString("error"))
+    }
+    return out
+}
+
+/** 全屏查看器：每个分区一个独立 TextView，外层 ScrollView，不受审查页嵌套布局影响。 */
+private fun showReviewDialog(ctx: Context, title: String, blocks: List<ReviewBlock>, toast: ToastFn) {
+    val container = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(CodexUi.dp(ctx, 11), CodexUi.dp(ctx, 8), CodexUi.dp(ctx, 11), CodexUi.dp(ctx, 8))
+    }
+    blocks.forEach { b ->
+        container.addView(TextView(ctx).apply {
+            text = "▸ ${b.title}（${b.body.length} 字）"
+            textSize = 12f
+            setTextColor(CodexUi.color("#FF88D0FF"))
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(0, CodexUi.dp(ctx, 9), 0, CodexUi.dp(ctx, 3))
+        })
+        container.addView(TextView(ctx).apply {
+            text = b.body.take(20000).ifBlank { "（空）" }
+            textSize = 10.5f
+            setTextColor(CodexUi.color("#FFE2E2E2"))
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(CodexUi.dp(ctx, 8), CodexUi.dp(ctx, 6), CodexUi.dp(ctx, 8), CodexUi.dp(ctx, 6))
+            background = CodexUi.roundedBg(ctx, "#FF141414", 6)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = CodexUi.dp(ctx, 5) }
+        })
+    }
+    val scroller = android.widget.ScrollView(ctx).apply {
+        setBackgroundColor(CodexUi.color("#FF1A1A1A"))
+        addView(container, android.view.ViewGroup.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+    val plain = blocks.joinToString("\n\n") { "【${it.title}】\n${it.body}" }
+    val dlg = androidx.appcompat.app.AlertDialog.Builder(ctx)
+        .setTitle(title)
+        .setView(scroller)
+        .setPositiveButton("复制全部内容", null)
+        .setNegativeButton("关闭", null)
+        .create()
+    dlg.setOnShowListener {
+        dlg.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("审查记录", plain))
+            toast("已复制全部审查内容（${plain.length} 字）")
+        }
+    }
+    dlg.show()
+    dlg.window?.setLayout(
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT)
+}
+
 fun contextPage(ctx: Context, toast: ToastFn): View = root(ctx) {
     title("上下文审查", "逐轮查看传给模型的 prompt、注入与 token 构成")
     val listBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -338,8 +471,12 @@ fun contextPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                     maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                     setPadding(0, CodexUi.dp(ctx, 2), 0, CodexUi.dp(ctx, 2))
                 })
-                val fullPrompt = wrapLongTokens("传给模型的 Prompt：\n" + t.optString("effective_prompt"))
-                val preview = promptPreview(fullPrompt, 160)
+                // 与 Web 端同口径：一轮里不只 effective_prompt，还有用户输入、注入指令、
+                // 模型输出、推理、工具调用、原始 usage 等分区。全部为查看器内容。
+                val blocks = reviewBlocks(t)
+                val preview = promptPreview(
+                    wrapLongTokens("用户输入：" + t.optString("user_input") + "\n" +
+                        "传入 Prompt：" + t.optString("effective_prompt")), 220)
                 val promptView = TextView(ctx).apply {
                     text = preview
                     textSize = 10.5f; setTextColor(CodexUi.color("#FFD0D8D0"))
@@ -353,24 +490,19 @@ fun contextPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                         LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = CodexUi.dp(ctx, 4) }
                 }
                 card.addView(promptView)
-                var expanded = false
+                // 卡片里加一行分区清单，让用户一眼看到本轮都有哪些数据（对齐 Web 的审查分区）
                 card.addView(TextView(ctx).apply {
-                    text = "▾ 展开完整 Prompt"
-                    textSize = 11f; setTextColor(CodexUi.color("#FF88CCFF"))
-                    setPadding(0, CodexUi.dp(ctx, 4), 0, CodexUi.dp(ctx, 2))
-                    setOnClickListener {
-                        expanded = !expanded
-                        if (expanded) {
-                            promptView.text = fullPrompt.take(4000)
-                            promptView.maxLines = Integer.MAX_VALUE
-                            text = "▴ 收起"
-                        } else {
-                            promptView.text = preview
-                            promptView.maxLines = 6
-                            text = "▾ 展开完整 Prompt"
-                        }
-                    }
+                    text = "分区：" + blocks.joinToString(" · ") { it.title.substringBefore("（") } +
+                        "（共 ${blocks.sumOf { it.body.length }} 字）"
+                    textSize = 10f; setTextColor(CodexUi.color("#FF9EFFB0"))
+                    setPadding(0, CodexUi.dp(ctx, 4), 0, 0)
                 })
+                // 「原地展开」在审查页这条链路上反复失效，改为独立全屏查看器，必定可见可滚动。
+                card.row {
+                    tinyButton("查看本轮全部审查（${blocks.size} 分区）") {
+                        showReviewDialog(ctx, "第 ${i + 1} 轮完整审查", blocks, toast)
+                    }
+                }
                 card.row {
                     tinyButton("删除本轮") {
                         CodexUi.confirm(ctx, "删除这一轮？",
@@ -410,9 +542,10 @@ fun contextPage(ctx: Context, toast: ToastFn): View = root(ctx) {
                 val sb = StringBuilder()
                 for (i in 0 until turns.length()) {
                     val t = turns.optJSONObject(i) ?: continue
-                    sb.append("#${i + 1} [${t.optString("mode")}]\n")
-                        .append(t.optString("user_input")).append('\n')
-                        .append(t.optString("effective_prompt")).append("\n\n")
+                    sb.append("===== #${i + 1} [${t.optString("mode")}] =====\n")
+                    reviewBlocks(t).forEach { b ->
+                        sb.append("【${b.title}】\n").append(b.body).append("\n\n")
+                    }
                 }
                 val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("上下文审查", sb.toString()))

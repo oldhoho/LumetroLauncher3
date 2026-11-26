@@ -28,6 +28,10 @@ data class ChatMessage(
     var text: String,
     val ts: Long = System.currentTimeMillis(),
     var process: String = "",
+    /** 助手气泡的深度思考过程（后端 reasoning 为累积文本，直接覆盖不追加），UI 折叠展示 */
+    var reasoning: String = "",
+    /** 联网搜索来源（title/url），Web 端 sources 事件：默认折叠、标题可点击跳浏览器 */
+    var sources: List<Pair<String, String>> = emptyList(),
     /** assistant 气泡：本次发送失败（连接断开/启动失败），UI 显示「重试」按钮 */
     var failed: Boolean = false,
     /** 失败气泡对应的用户原文，用于一键重试 */
@@ -768,6 +772,33 @@ object AiConsoleClient {
     fun modeLabel(mode: String): String =
         modeDefs()[mode]?.name?.ifBlank { null } ?: MODE_DEFAULTS[mode]?.name ?: mode
 
+    /** 智能模式提醒策略：两端共用 /api/config.suggestMode */
+    data class SuggestCfg(val policy: String = "cautious", val preferred: String = "auto")
+
+    fun suggestCfg(): SuggestCfg {
+        val o = configObj.optJSONObject("suggestMode") ?: return SuggestCfg()
+        val policy = o.optString("policy", "cautious").let {
+            if (it in setOf("off", "cautious", "eager")) it else "cautious"
+        }
+        val preferred = o.optString("preferred", "auto").let {
+            if (it in MODE_DEFAULTS) it else "auto"
+        }
+        return SuggestCfg(policy, preferred)
+    }
+
+    fun saveSuggestCfg(cfg: SuggestCfg, cb: ((Boolean, String) -> Unit)? = null) {
+        saveConfig("suggestMode", JSONObject()
+            .put("policy", cfg.policy).put("preferred", cfg.preferred), cb)
+    }
+
+    /** 模式真实能力：cli 由内部 key 决定（不可编辑），search/think 由 modeDefs 决定 */
+    fun modeCan(key: String, cap: String): Boolean = when (cap) {
+        "cli" -> key == "full" || key == "lite" || key == "custom"
+        "search" -> modeCfg(key).search
+        "think" -> modeCfg(key).think
+        else -> false
+    }
+
     /** 与网页端 effectiveModeCfg() 对齐：本会话快速开关优先于模式预设 */
     fun effectiveCfg(): ModeCfg {
         val base = modeCfg()
@@ -920,6 +951,36 @@ object AiConsoleClient {
         } else cb?.invoke(true, "$label（仅本会话）")
     }
 
+    /**
+     * 设置面板的「联网搜索 / 深度思考」是模式级默认开关：写入当前工作模式的
+     * modeDefs，影响此后新建的所有会话；同时清掉本会话的 quick 覆盖，避免旧
+     * 覆盖把刚设好的默认值继续压住。顶栏 chip 仍走 toggleQuick（仅本会话）。
+     */
+    fun setModeDefault(kind: String, enabled: Boolean, cb: ((Boolean, String) -> Unit)? = null) {
+        if (kind != "think" && kind != "search") { cb?.invoke(false, "未知开关"); return }
+        val mode = currentMode
+        val cur = modeCfg(mode)
+        val updated = if (kind == "think") cur.copy(think = enabled) else cur.copy(search = enabled)
+        val label = if (enabled) "已开启" else "已关闭"
+        saveModeCfg(mode, updated) { ok, msg ->
+            if (!ok) { cb?.invoke(false, msg); return@saveModeCfg }
+            clearQuickOverride(kind) { _, _ -> cb?.invoke(true, "$label「${modeLabel(mode)}」模式默认（新会话同步）") }
+        }
+    }
+
+    /** 清除本会话的快速覆盖，让模式默认立即生效；服务端用 null 表示清除 */
+    fun clearQuickOverride(kind: String, cb: ((Boolean, String) -> Unit)? = null) {
+        if (kind == "think") quickThink = null else if (kind == "search") quickSearch = null else return
+        lastMetaSig = null
+        val sid = sessionId
+        if (!sid.isNullOrBlank()) {
+            api("POST", "/api/sessions/meta",
+                JSONObject().put("id", sid)
+                    .put("meta", JSONObject().put(kind, JSONObject.NULL)).toString()
+            ) { cb?.invoke(true, "已恢复模式默认") }
+        } else cb?.invoke(true, "已恢复模式默认")
+    }
+
     /** 从会话列表恢复本会话的 think/search 快速覆盖 */
     private suspend fun loadQuickOverrides(sid: String?) {
         quickThink = null
@@ -971,6 +1032,24 @@ object AiConsoleClient {
                     think, search, o.optString("group"), o.optBoolean("pinned")))
             }
             onResult(list)
+        }
+    }
+
+    /** 新建会话：解绑本地旧会话，让后端分配新 id，再拉空历史（对应 Web 侧栏「新建会话」） */
+    fun newSession(cb: ((Boolean, String) -> Unit)? = null) {
+        scope.launch {
+            sessionId = null
+            val id = ensureSession()
+            if (id == null) {
+                cb?.invoke(false, lastError ?: "创建会话失败")
+                return@launch
+            }
+            synchronized(_messages) { _messages.clear() }
+            lastSyncedSignature = ""
+            lastHistorySig = null
+            loadQuickOverrides(id)
+            refreshHistory { ok, msg -> cb?.invoke(ok, msg) }
+            notifyListeners()
         }
     }
 
@@ -1060,7 +1139,13 @@ object AiConsoleClient {
     }
 
     private fun messagesSignature(list: List<ChatMessage>): String =
-        list.joinToString("\u0001") { "${it.role}:${it.text}" }
+        list.joinToString("\u0001") {
+            // 把来源纳入签名：Web 对话正文可能先被一轮轮询同步，来源在下一轮才从
+            // /api/context 还原出来。若签名只看正文，这一轮会被当成"无变化"跳过，
+            // 来源折叠块就永远补不上。用 url 序列做指纹，稳定且不受顺序外因素影响。
+            val srcFp = it.sources.joinToString(",") { (_, url) -> url }
+            "${it.role}:${it.text}|s=$srcFp"
+        }
 
     /** 把当前本地消息标记为已同步，避免轮询把同一条再次当作 Web 新消息播报 */
     private fun syncSignatureFromLocal() {
@@ -1213,7 +1298,13 @@ object AiConsoleClient {
                 // 从它前面最近的一条 user 气泡取回原文，供重试复用
                 val userText = _messages.take(_messages.size - 1)
                     .lastOrNull { it.role == "user" }?.text?.trim().orEmpty()
-                last.text = msg
+                // 与 Web 端错误气泡一致带 ⚠️ 前缀，并给出可操作的排查提示
+                val friendly = when {
+                    Regex("unauthor|invalid.*key|401|403|authentication|api.?key|insufficient|余额|欠费", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(msg) -> "⚠️ API 认证/权限失败：$msg\n\n请检查 Key、Base URL 与账户状态。"
+                    else -> "⚠️ $msg"
+                }
+                last.text = friendly
                 last.process = ""
                 last.failed = true
                 last.retryText = userText
@@ -1268,8 +1359,14 @@ object AiConsoleClient {
             if (content.isBlank()) continue
             // 过滤本地已删除的消息，避免刷新历史后复活
             if (messageFingerprint(role, content) in hidden) continue
+            // v68+ 后端 /api/history 直接在 assistant 消息上带 sources（与 Web /api/context
+            // 同源）。这是跨端来源的权威路径：Web 端发起的对话、历史会话都能拿到，
+            // 不再依赖客户端在 SSE 里恰好收到事件。
+            val srcs = obj.optJSONArray("sources")?.let { parseSourceItems(it) }.orEmpty()
             list.add(ChatMessage(
                 role, content, obj.optLong("ts", 0L),
+                reasoning = obj.optString("reasoning"),
+                sources = srcs,
                 id = obj.optString("id"), turnId = obj.optString("turnId")
             ))
         }
@@ -1290,6 +1387,17 @@ object AiConsoleClient {
                 return@launch
             }
             val list = parseHistoryMessages(r) ?: emptyList()
+            // 与 Web 端同源兜底：/api/history 不带 sources 时，从 /api/context 的
+            // turn.events 按 turnId 还原。覆盖切会话/手动刷新场景，避免来源丢失。
+            val contextSources = try { sessionId?.let { loadContextSources(it) } }
+                catch (_: Exception) { emptyMap() } ?: emptyMap()
+            if (contextSources.isNotEmpty()) {
+                list.forEach { m ->
+                    if (m.sources.isEmpty() && m.turnId.isNotBlank()) {
+                        contextSources[m.turnId]?.let { m.sources = it }
+                    }
+                }
+            }
             // 空历史不能覆盖本地乐观消息：新会话刚发一条时后端 turn 可能还没落库，
             // 若此时 clear() 会把用户刚发出的气泡清空，表现为「发送后什么都没有」。
             if (list.isEmpty() && _messages.isNotEmpty()) {
@@ -1298,11 +1406,41 @@ object AiConsoleClient {
                 return@launch
             }
             // 失败气泡还没落到服务端，覆盖时要保留，否则「重试」按钮会凭空消失
-            val failedLocals = synchronized(_messages) { _messages.filter { it.failed } }
+            // 同理：服务端 /api/history 不返回 reasoning，end 后 400ms 的权威刷新若直接覆盖，
+            // 本轮刚产生的「已深度思考」折叠块会凭空消失。覆盖前按身份把本地思考过程存下来。
+            // v68+ 后端 /api/history 已直接带 sources（权威来源），正常轮次无需合并。
+            // 但本客户端刚发出的乐观消息在 turn 落库前可能带 SSE 来源而历史里还没有，
+            // 覆盖后按身份并回去，避免这几百毫秒内来源折叠块闪一下就消失。
+            val localSources = synchronized(_messages) {
+                _messages.filter { it.sources.isNotEmpty() }
+                    .associate { "${it.role}|${it.text.trim()}" to it.sources }
+            }
+            val (failedLocals, localReasoning, localProcess) = synchronized(_messages) {
+                Triple(
+                    _messages.filter { it.failed },
+                    _messages.filter { it.reasoning.isNotBlank() }
+                        .associate { "${it.role}|${it.text.trim()}" to it.reasoning },
+                    // /api/history 不返回工具过程（联网搜索来源、命令输出都只在 SSE 里），
+                    // 不并回去的话 end 后 400ms 的权威刷新会让「过程」折叠块凭空消失。
+                    _messages.filter { it.process.isNotBlank() }
+                        .associate { "${it.role}|${it.text.trim()}" to it.process }
+                )
+            }
             synchronized(_messages) {
                 _messages.clear()
                 _messages.addAll(list)
                 _messages.addAll(failedLocals)
+                // 本地乐观消息的正文与落库正文一致，用 角色+正文 匹配把思考过程并回去；
+                // 结构签名里的 reasoning/process.isNotBlank() 因此保持稳定，不会触发整表重建。
+                localReasoning.forEach { (key, reason) ->
+                    _messages.firstOrNull { "${it.role}|${it.text.trim()}" == key }?.reasoning = reason
+                }
+                localProcess.forEach { (key, proc) ->
+                    _messages.firstOrNull { "${it.role}|${it.text.trim()}" == key }?.process = proc
+                }
+                localSources.forEach { (key, srcs) ->
+                    _messages.firstOrNull { "${it.role}|${it.text.trim()}" == key }?.sources = srcs
+                }
             }
             syncSignatureFromLocal()
             notifyListeners()
@@ -1367,6 +1505,17 @@ object AiConsoleClient {
                 val r = request("/api/history?s=" + enc(sid), "GET", null) ?: continue
                 val serverList = parseHistoryMessages(r) ?: continue
                 if (serverList.isEmpty()) continue
+                // 关键：Web 端对话产生的来源不在 /api/history 里（本地也从未收到那条 SSE）。
+                // 与 Web 端 renderSessionHistory 同源，从 /api/context 的 turn.events 还原，
+                // 按 turnId 精确补回，这样 Web 对话完成后的一轮轮询就能带上来源。
+                val contextSources = try { loadContextSources(sid) } catch (_: Exception) { emptyMap() }
+                if (contextSources.isNotEmpty()) {
+                    serverList.forEach { m ->
+                        if (m.sources.isEmpty() && m.turnId.isNotBlank()) {
+                            contextSources[m.turnId]?.let { m.sources = it }
+                        }
+                    }
+                }
                 val failedLocals = synchronized(_messages) { _messages.filter { it.failed } }
                 val merged = serverList + failedLocals
                 val msgSig = messagesSignature(merged)
@@ -1677,9 +1826,9 @@ object AiConsoleClient {
             }
             "reasoning" -> {
                 step = "思考中"
-                d.optString("text").takeIf { it.isNotBlank() }?.let {
-                    appendProcess("[思考] " + it.take(300))
-                }
+                // 后端下发的是「累积文本」（每帧都是完整思考），必须覆盖而非追加，
+                // 否则每帧叠一遍会把同一段思考重复几十次，折叠块里全是乱码般重复。
+                d.optString("text").takeIf { it.isNotBlank() }?.let { setReasoning(it) }
             }
             "command" -> {
                 step = "执行命令"
@@ -1688,10 +1837,26 @@ object AiConsoleClient {
                     appendProcess(it.take(500))
                 }
             }
+            "sources" -> {
+                // Web 端最新：结构化 citations 事件 {items:[{title,url}]}，UI 默认折叠、
+                // 标题是可点击超链接。后端同时仍发旧版 tool("联网搜索来源", status 纯文本)
+                // 供老客户端/审查页兼容——这里跳过它，避免同一批来源显示两遍。
+                step = "联网搜索来源"
+                setSources(d.optJSONArray("items"))
+            }
             "tool" -> {
                 val tool = d.optString("tool")
+                // 新版后端同时发 sources 事件，纯文本镜像不再进对话过程，防止重复。
+                // 老后端没有 sources 事件时，仍用这段文本保留来源可追溯性。
+                if (tool == "联网搜索来源" && d.optString("status").contains(" — ")) {
+                    step = "联网搜索来源"
+                    return
+                }
                 step = if (tool.isBlank()) "调用工具" else "调用工具：$tool"
                 if (tool.isNotBlank()) appendProcess("[工具] $tool")
+                d.optString("status").takeIf { it.isNotBlank() }?.let {
+                    appendProcess(it.take(2000))
+                }
             }
             "files" -> step = "修改文件"
             "todo" -> step = "更新任务清单"
@@ -1717,8 +1882,12 @@ object AiConsoleClient {
             "log" -> d.optString("text").takeIf { it.isNotBlank() }?.let { appendLog(it) }
             "error" -> {
                 val msg = d.optString("message").ifBlank { "任务出错" }
-                hadError = true
-                lastError = msg
+                // 传输层重连噪音不进对话，只留诊断日志（与 Web 端过滤口径一致）
+                if (!Regex("reconnect|stream disconnected|error decoding response body|transport error|connection reset|temporarily unavailable", RegexOption.IGNORE_CASE).containsMatchIn(msg)) {
+                    hadError = true
+                    lastError = msg
+                    appendErrorBubble(msg)
+                }
                 appendLog("[错误] $msg")
                 appendProcess("[错误] $msg")
                 statusText = "出错"
@@ -1756,6 +1925,113 @@ object AiConsoleClient {
         }
     }
 
+    /**
+     * 深度思考文本：后端每帧都是「到目前为止的完整累积」，因此覆盖写入。
+     * 与 Web 端 `reasoning` 事件 `rd.textContent = data.text` 口径一致。
+     */
+    private fun setReasoning(text: String) {
+        synchronized(_messages) {
+            val last = _messages.lastOrNull { it.role == "assistant" } ?: return
+            last.reasoning = text.takeLast(8000)
+        }
+    }
+
+    /** 解析 sources 事件的 items；按 url 去重、最多 12 条（与 Web 一致） */
+    private fun parseSourceItems(items: org.json.JSONArray?): List<Pair<String, String>> {
+        if (items == null || items.length() == 0) return emptyList()
+        val seen = HashSet<String>()
+        val list = mutableListOf<Pair<String, String>>()
+        for (i in 0 until items.length()) {
+            val o = items.optJSONObject(i) ?: continue
+            val url = o.optString("url")
+            if (url.isBlank() || !seen.add(url)) continue
+            val title = o.optString("title").ifBlank { url }
+            list.add(title to url)
+            if (list.size >= 12) break
+        }
+        return list
+    }
+
+    /** 联网搜索来源：后端一次性下发 {items:[{title,url}]} */
+    private fun setSources(items: org.json.JSONArray?) {
+        val list = parseSourceItems(items)
+        if (list.isEmpty()) return
+        synchronized(_messages) {
+            val last = _messages.lastOrNull { it.role == "assistant" } ?: return
+            last.sources = list
+        }
+    }
+
+    /**
+     * 从 /api/context 还原每轮联网搜索来源，按 turnId 索引。
+     *
+     * 与 Web 端 renderSessionHistory 完全同源：Web 端历史回放不走 /api/history，
+     * 而是读审查记录 turn.events 里的 sources 事件。Web 端发起的对话，启动器
+     * 从未收到过那条 SSE，后端 /api/history 也可能不带 sources（旧版后端），
+     * 只有 /api/context 的 events 一定带 —— 所以这里按 turnId 还原，是跨端
+     * 来源最可靠的权威路径，不依赖后端契约升级。
+     */
+    private suspend fun loadContextSources(sid: String): Map<String, List<Pair<String, String>>> {
+        val r = request("/api/context?s=" + enc(sid), "GET", null) ?: return emptyMap()
+        val turns = r.optJSONArray("turns") ?: return emptyMap()
+        val out = mutableMapOf<String, List<Pair<String, String>>>()
+        for (i in 0 until turns.length()) {
+            val t = turns.optJSONObject(i) ?: continue
+            val tid = t.optString("id")
+            if (tid.isBlank()) continue
+            val events = t.optJSONArray("events") ?: continue
+            var items: List<Pair<String, String>> = emptyList()
+            // 新版：结构化 sources {items:[{title,url}]}（Web 端现用）
+            for (j in 0 until events.length()) {
+                val e = events.optJSONObject(j) ?: continue
+                if (e.optString("event") != "sources") continue
+                items = parseSourceItems(e.optJSONObject("data")?.optJSONArray("items"))
+                if (items.isNotEmpty()) break
+            }
+            // 旧记录：tool("联网搜索来源", "标题 — URL\n...")
+            if (items.isEmpty()) {
+                for (j in 0 until events.length()) {
+                    val e = events.optJSONObject(j) ?: continue
+                    if (e.optString("event") != "tool") continue
+                    val d = e.optJSONObject("data") ?: continue
+                    if (d.optString("tool") != "联网搜索来源") continue
+                    val parsed = d.optString("status").split("\n").mapNotNull { line ->
+                        val parts = line.split(" — ")
+                        if (parts.size < 2) return@mapNotNull null
+                        val url = parts.last().trim()
+                        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                            return@mapNotNull null
+                        }
+                        val title = parts.dropLast(1).joinToString(" — ").trim().ifBlank { url }
+                        title to url
+                    }
+                    if (parsed.isNotEmpty()) { items = parsed; break }
+                }
+            }
+            if (items.isNotEmpty()) out[tid] = items
+        }
+        return out
+    }
+
+    /**
+     * SSE 运行期错误：像 Web 端一样在对话流里插入一条独立的 ⚠️ 助手气泡，
+     * 而不是只写进诊断日志——用户要能在对话里直接看到失败反馈。
+     * 去重：同一条回复里同一错误只插一次，避免重连 chatter 刷屏。
+     */
+    private fun appendErrorBubble(msg: String) {
+        synchronized(_messages) {
+            val last = _messages.lastOrNull { it.role == "assistant" }
+            if (last != null && last.text.startsWith("⚠️") && last.text.contains(msg)) return@synchronized
+            // 标记 failed 才能在随后 400ms 的 refreshHistory 里被保留（合并逻辑只留 failed 本地气泡）；
+            // 带上前一条用户原文，让气泡的「重试」按钮可一键重发。
+            val userText = _messages.take(maxOf(0, _messages.size - 1))
+                .lastOrNull { it.role == "user" }?.text?.trim().orEmpty()
+            _messages.add(ChatMessage("assistant", "⚠️ $msg", failed = true, retryText = userText))
+        }
+        syncSignatureFromLocal()
+        notifyListeners()
+    }
+
     private fun finishFromResult(res: JSONObject?) {
         running = false
         val exit = res?.optInt("exit", 0) ?: 0
@@ -1768,7 +2044,11 @@ object AiConsoleClient {
             exit == 0 -> "运行结束"
             else -> "运行结束（退出码 $exit）"
         }
-        if (err.isNotBlank()) appendLog("[结束] " + err.take(500))
+        if (err.isNotBlank()) {
+            appendLog("[结束] " + err.take(500))
+            // 有些错误只在 end 的 error 字段里给（未单独发 error 事件），对话里也要有反馈
+            appendErrorBubble(err.take(500))
+        }
         step = ""
         // 本地流已完整播报，标记为已同步，轮询不会把同一条当 Web 新消息再读一遍
         syncSignatureFromLocal()

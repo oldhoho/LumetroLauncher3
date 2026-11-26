@@ -15,11 +15,16 @@ class AiConsoleActivity : AppCompatActivity() {
         const val EXTRA_PREFILL = "ai_prefill"
         /** 工具箱里点「填入对话」时只填文字、不自动发送，与 Web 端一致 */
         const val EXTRA_PREFILL_ONLY = "ai_prefill_only"
+        /** 全局搜索命中：切到会话后滚动定位并高亮目标消息 */
+        const val EXTRA_JUMP_TERMS = "ai_jump_terms"
+        const val EXTRA_JUMP_ROLE = "ai_jump_role"
     }
 
     private var overlay: AiChatOverlay? = null
     private var pendingPrefill: String? = null
     private var prefillOnly = false
+    private var jumpTerms: String? = null
+    private var jumpRole: String? = null
     private val pickFile = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         overlay?.onPickedFile(uri)
     }
@@ -29,6 +34,8 @@ class AiConsoleActivity : AppCompatActivity() {
         AiConsoleClient.init(this)
         pendingPrefill = intent.getStringExtra(EXTRA_PREFILL)
         prefillOnly = intent.getBooleanExtra(EXTRA_PREFILL_ONLY, false)
+        jumpTerms = intent.getStringExtra(EXTRA_JUMP_TERMS)
+        jumpRole = intent.getStringExtra(EXTRA_JUMP_ROLE)
         val view = AiChatOverlay(
             this,
             onClose = { finish() },
@@ -36,6 +43,9 @@ class AiConsoleActivity : AppCompatActivity() {
             onPickFile = { pickFile.launch("*/*") },
         )
         overlay = view
+        if (!jumpTerms.isNullOrBlank()) {
+            view.requestJump(jumpRole ?: "", jumpTerms!!)
+        }
         setContentView(view)
 
         // 输入行紧贴会话页可用区底部（adjustResize 会在键盘弹出时自动上移整体）。

@@ -178,8 +178,7 @@ fun settingsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
         val capsInfo = listOf(
             "memory" to "长期记忆 · 把本会话 MEMORY.md 注入请求",
             "compact" to "上下文压缩 · 历史过长时压成摘要",
-            "auto_title" to "自动标题 · 首轮后自动命名会话",
-            "smart_mode" to "智能模式提醒 · 纯对话中识别工具意图"
+            "auto_title" to "自动标题 · 首轮后自动命名会话"
         )
         fun reload() {
             AiConsoleClient.api("GET", "/api/capabilities") { resp ->
@@ -203,6 +202,28 @@ fun settingsPage(ctx: Context, toast: ToastFn): View = root(ctx) {
             }
         }
         reload()
+        // 智能模式提醒策略：两端共用同一份共享配置，按模式真实能力判断
+        hint("智能模式提醒：按每个模式的真实能力判断；模式改名或改开关后两端立即跟着变。")
+        segment(
+            listOf("off" to "关闭", "cautious" to "仅能力不足", "eager" to "主动识别"),
+            AiConsoleClient.suggestCfg().policy
+        ) { p ->
+            val cur = AiConsoleClient.suggestCfg()
+            AiConsoleClient.saveSuggestCfg(cur.copy(policy = p)) { ok, msg ->
+                toast(if (ok) "提醒策略已更新，Web 端同步" else msg)
+            }
+        }
+        hint("优先建议模式：缺能力时优先推荐；「自动」按能力顺序挑。")
+        segment(
+            listOf("auto" to "自动") +
+                AiConsoleClient.MODE_DEFAULTS.keys.map { it to AiConsoleClient.modeLabel(it) },
+            AiConsoleClient.suggestCfg().preferred
+        ) { pref ->
+            val cur = AiConsoleClient.suggestCfg()
+            AiConsoleClient.saveSuggestCfg(cur.copy(preferred = pref)) { ok, msg ->
+                toast(if (ok) "优先建议模式已更新，Web 端同步" else msg)
+            }
+        }
         // MEMORY.md 编辑器（与 Web 设置页同一份文件）
         val memEdit = edit("每行一条长期记忆…", "", singleLine = false)
         row {
@@ -952,8 +973,9 @@ fun searchPage(ctx: Context, toast: ToastFn, onOpen: (String, String) -> Unit): 
                             maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                         })
                         card.row {
-                            tinyButton("打开会话") { onOpen(sid, "") }
-                            if (snippet.isNotBlank()) tinyButton("带入片段") { onOpen(sid, snippet) }
+                            // 带搜索词进入对话页，由对话页滚动定位并高亮命中的消息
+                            tinyButton("定位命中") { onOpen(sid, q) }
+                            tinyButton("仅打开会话") { onOpen(sid, "") }
                         }
                         listBox.addView(card)
                     }
@@ -982,6 +1004,7 @@ fun guidePage(ctx: Context, toast: ToastFn): View = root(ctx) {
 
 fun promptsPage(ctx: Context, toast: ToastFn): View {
     var remoteConfigListener: (() -> Unit)? = null
+    var flushNamesHook: (() -> Unit)? = null
     val page = root(ctx) {
     title("提示词与工作模式", "五个模式全部可自定义；系统词由模式自己携带")
 
@@ -990,6 +1013,16 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
     val cfgBox = TextView(ctx).apply { textSize = 11f; setTextColor(CodexUi.color("#FF9EFFB0")) }
     val cfgArea = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
     var presets = AiConsoleClient.promptPresets().toMutableList()
+
+    // 模式名称/说明与 Web 端 cfgName 的 oninput 对齐：边输入边保存（防抖），
+    // 失焦/离开页面立即补提交。旧版只在失焦时保存，用户改完名直接切到 Web
+    // 查看时启动器根本没写服务端，这就是跨端改名看不到效果的根因。
+    var modeNameEdit: EditText? = null
+    var modeDescEdit: EditText? = null
+    var editingMode = AiConsoleClient.currentMode()
+    var pendingModeSave: Runnable? = null
+    val modeSaveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    var rebuildingCfg = false
 
     fun refreshCfgText() {
         val mode = AiConsoleClient.currentMode()
@@ -1001,9 +1034,32 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
             "推理 ${c.effort} · 思考 ${c.think} · 联网 ${c.search} · 系统词 $carried"
     }
 
+    /** 把当前输入框里的名称/说明落盘。无变化时直接返回，避免无意义的 rev 竞争。 */
+    fun flushModeNameDesc() {
+        pendingModeSave?.let { modeSaveHandler.removeCallbacks(it) }
+        pendingModeSave = null
+        val ne = modeNameEdit ?: return
+        val de = modeDescEdit ?: return
+        val mode = editingMode
+        val cur = AiConsoleClient.modeCfg(mode)
+        val newName = ne.text.toString().trim()
+            .ifBlank { AiConsoleClient.MODE_DEFAULTS[mode]?.name ?: "自定义" }
+        val newDesc = de.text.toString().trim()
+        if (newName == cur.name && newDesc == cur.desc) return
+        AiConsoleClient.saveModeCfg(mode, cur.copy(name = newName, desc = newDesc))
+        refreshCfgText()
+    }
+    flushNamesHook = { flushModeNameDesc() }
+
     fun rebuildCfgArea() {
+        if (rebuildingCfg) return
+        rebuildingCfg = true
+        try {
+        // 重建前先把旧输入框内容写出去，避免远端刷新/切模式时把未提交的改名丢掉。
+        flushModeNameDesc()
         cfgArea.removeAllViews()
         val mode = AiConsoleClient.currentMode()
+        editingMode = mode
         val c = AiConsoleClient.modeCfg(mode)
         fun editField(key: String, value: String, labelText: String, maxLen: Int): EditText {
             cfgArea.label(labelText)
@@ -1013,16 +1069,27 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
         }
         val nameEdit = editField("name", c.name, "模式名称（显示在工作模式条上）", 12)
         val descEdit = editField("desc", c.desc, "模式说明", 60)
-        fun commitNameDesc() {
-            val cur = AiConsoleClient.modeCfg(mode)
-            AiConsoleClient.saveModeCfg(mode, cur.copy(
-                name = nameEdit.text.toString().trim().ifBlank { AiConsoleClient.MODE_DEFAULTS[mode]!!.name },
-                desc = descEdit.text.toString().trim()
-            ))
-            refreshCfgText()
+        modeNameEdit = nameEdit
+        modeDescEdit = descEdit
+
+        // 与 Web 的 oninput + 500ms 防抖一致：输入即保存，不等失焦。
+        var suppressWatcher = true
+        val saveWatcher = object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (suppressWatcher) return
+                pendingModeSave?.let { modeSaveHandler.removeCallbacks(it) }
+                val runnable = Runnable { flushModeNameDesc() }
+                pendingModeSave = runnable
+                modeSaveHandler.postDelayed(runnable, 450L)
+            }
         }
-        nameEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitNameDesc() }
-        descEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitNameDesc() }
+        nameEdit.addTextChangedListener(saveWatcher)
+        descEdit.addTextChangedListener(saveWatcher)
+        suppressWatcher = false
+        nameEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) flushModeNameDesc() }
+        descEdit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) flushModeNameDesc() }
 
         cfgArea.label("推理强度")
         cfgArea.segment(listOf("minimal" to "极简", "low" to "低", "medium" to "中", "high" to "高"),
@@ -1056,13 +1123,19 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
             button("恢复默认模式") {
                 CodexUi.confirm(ctx, "恢复默认模式？",
                     "五个模式的名称、说明、推理强度、开关与系统词绑定都会还原为出厂默认；提示词预设不受影响。") {
+                    // 先断开旧输入框引用，避免 rebuild 时把旧值重新写回服务端
+                    modeNameEdit = null
+                    modeDescEdit = null
                     AiConsoleClient.resetModeDefs(); toast("已恢复默认模式")
                     cfgBox.text = ""
-                    refreshCfgText()
+                    rebuildCfgArea()
                 }
             }
         }
         refreshCfgText()
+        } finally {
+            rebuildingCfg = false
+        }
     }
 
     section("工作模式") {
@@ -1188,7 +1261,8 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
         remoteRefreshPending = false
     }
     remoteConfigListener = {
-        val editing = nameEdit.hasFocus() || textEdit.hasFocus()
+        val editing = nameEdit.hasFocus() || textEdit.hasFocus() ||
+            modeNameEdit?.hasFocus() == true || modeDescEdit?.hasFocus() == true
         if (editing) {
             remoteRefreshPending = true
         } else {
@@ -1215,6 +1289,8 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
                 AiConsoleClient.addConfigListener(listener)
             }
             override fun onViewDetachedFromWindow(v: View) {
+                // 切到 Web/其他页面时把防抖中的改名立即写出去，不让它在队列里丢失
+                flushNamesHook?.invoke()
                 AiConsoleClient.removeConfigListener(listener)
             }
         })

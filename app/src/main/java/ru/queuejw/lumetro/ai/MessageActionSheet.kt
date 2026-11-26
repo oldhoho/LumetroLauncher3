@@ -39,6 +39,8 @@ class MessageActionSheet(
     private val index: Int,
     private val onEdit: (newText: String, turnId: String) -> Unit,
     private val onQuote: (quoted: String) -> Unit,
+    /** 刷新（助手）/ 重新发送（用户）：用同一轮的原问题重新生成 */
+    private val onRegen: (text: String, turnId: String) -> Unit,
     private val onDismiss: () -> Unit,
     /** 后端稳定消息 id / 所属会话 / 角色 / 轮次 id；空串表示本地乐观消息 */
     private val msgId: String = "",
@@ -60,7 +62,10 @@ class MessageActionSheet(
     private data class Action(val label: String, val icon: String)
     private val columns = 4
     private val items = listOf(
-        Action("复制", "📋"), Action("转发", "↗"), Action("收藏", "⭐"), Action("删除", "🗑"),
+        // 第 4 格按角色区分：助手是「刷新」重新生成，用户是「重新发送」原问题；
+        // 不再用删除（真删除移到「会话管理」页，避免对话里误删整轮）。
+        Action("复制", "📋"), Action("转发", "↗"), Action("收藏", "⭐"),
+        (if (role == "user") Action("重发", "↻") else Action("刷新", "⟳")),
         // Web 端语义：用户消息可「修改」，助手消息只做「引用」回填输入框。
         (if (role == "user") Action("修改", "✏️") else Action("引用", "❝")),
         Action("朗读", "🔊"), Action("翻译", "🌐"), Action("搜一搜", "🔍"),
@@ -218,16 +223,13 @@ class MessageActionSheet(
                     ctx.startActivity(Intent.createChooser(send, "转发消息").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }.onFailure { toast("没有可转发的应用") }
             }
-            "删除" -> {
-                if (index < 0) toast("无法定位该消息")
-                else CodexUi.confirm(
-                    ctx,
-                    "删除这一轮？",
-                    "会删除这条消息所在的整轮对话（含助手回答），两端同步消失；服务端会自动备份。",
-                ) {
-                    AiConsoleClient.deleteMessage(index) { ok, msg ->
-                        toast(if (ok) msg else "删除失败：$msg")
-                    }
+            // 助手「刷新」/ 用户「重发」：取本轮原问题，删掉该轮及之后再用原文重新生成。
+            "刷新", "重发" -> {
+                if (turnId.isBlank()) {
+                    toast("这一轮尚未保存，无法重新生成")
+                } else {
+                    // 用户消息用自身文本；助手消息回调里由上层按 turnId 取同一轮的 user 原文
+                    onRegen(if (role == "user") text else "", turnId)
                 }
             }
             // 用百度翻译（国内可访问），auto→zh 自动识别源语言

@@ -25,6 +25,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDialog
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -57,8 +58,32 @@ class AiChatOverlay(
     private val chatList: LinearLayout
     private val inputBox: EditText
     private val sendBtn: TextView
-    private val settingsToggle: TextView
+    private val menuBtn: TextView
+    /** 顶栏右上角的快速开关图标：联网搜索 / 深度思考 */
+    private lateinit var quickSearchBtn: TextView
+    private lateinit var quickThinkBtn: TextView
     private val settingsPanel: LinearLayout
+
+    /** 侧边抽屉：对齐 Web 端窄屏的 off-canvas 侧栏，入口全部从这里进入 */
+    private lateinit var drawer: LinearLayout
+    private lateinit var drawerMask: View
+    private lateinit var drawerSessionBox: LinearLayout
+    /** 抽屉顶部内嵌的全局搜索框：输入即时查后端，结果直接替换下面的会话区 */
+    private lateinit var drawerSearchInput: EditText
+    private val drawerSearchHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var drawerSearchRunnable: Runnable? = null
+    private var drawerSearchSeq = 0
+    /** 抽屉系统组里的自动朗读开关（settingsPanel 移除后的唯一入口） */
+    private lateinit var drawerAutoItem: TextView
+    /** 抽屉底部的账户余额行（DeepSeek /api/balance，走后端代理，刷新时更新） */
+    private lateinit var drawerBalanceItem: TextView
+    private var balanceBusy = false
+    private var drawerOpen = false
+    private var drawerWidth = 0
+
+    /** 输入区上方的模式条，对齐 Web 端 .modeSeg */
+    private lateinit var modeStrip: LinearLayout
+    private val modeStripButtons = mutableListOf<TextView>()
     /** 设置面板改为对齐 Web 端的功能按钮 */
     private lateinit var featAuto: TextView
     private lateinit var featSearch: TextView
@@ -71,7 +96,13 @@ class AiChatOverlay(
     private var autoSpeak = false
     private var autoTts: TextToSpeech? = null
     private var pendingAutoText: String? = null
-    /** 已朗读过的最后一条正文，避免同一条被本地 render 与 Web 轮询各播一次 */
+    /**
+     * 已朗读过的末尾正文，避免同一条被本地 render 与 Web 轮询各播一次。
+     * 关键：朗读有两个入口——render() 与 remoteAssistantListener，后者运行在历史
+     * 轮询协程（非主线程）。两者若直接检查/改写本字段会有竞态：同一段文本被两个
+     * 线程同时判为"未读"，于是各播一次，表现为后台一直重复朗读最后一段。
+     * 因此两个入口统一 post 到主线程串行执行去重与朗读，杜绝并发窗口。
+     */
     private var lastSpokenText: String? = null
     /** 基线所属会话：切换会话时把当前末尾回复记为已读，避免翻开旧会话就念历史 */
     private var lastSpokenSid: String? = null
@@ -96,15 +127,74 @@ class AiChatOverlay(
     /** 当前操作卡绑定的消息（index+text）；换消息时必须换绑定，否则操作会打到旧消息上 */
     private var actionSheetKey: Pair<Int, String>? = null
 
+    /**
+     * 气泡正文：短按弹操作卡、长按选字，两者都在这里协调，且绝不 setOnTouchListener。
+     *
+     * 为什么不用 OnClickListener：setTextIsSelectable(true) 让 TextView 在 touch mode
+     * 下可聚焦，第一次点击会被系统消费成「获取焦点」，click 根本不触发 —— 表现为
+     * 「点一下没反应，点第二下才弹卡」。
+     * 为什么不用 setOnTouchListener：它会覆盖 TextView 内部负责长按选字/复制菜单的
+     * 监听器 —— 表现为「长按失效」。
+     * dispatchTouchEvent 在内部处理之前，只观察、返回 super 不消费事件：短按自己判定，
+     * 长按/滑动照常交给 TextView 和 ScrollView。
+     */
+    private class BubbleBody(context: android.content.Context) : TextView(context) {
+        var onBubbleTouch: ((Boolean) -> Unit)? = null
+        var onSingleTap: (() -> Unit)? = null
+
+        private var downX = 0f
+        private var downY = 0f
+        private var moved = false
+        private var longPressFired = false
+        private val longPressCheck = Runnable { longPressFired = true }
+        private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+
+        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    onBubbleTouch?.invoke(true)
+                    downX = ev.x
+                    downY = ev.y
+                    moved = false
+                    longPressFired = false
+                    removeCallbacks(longPressCheck)
+                    postDelayed(longPressCheck,
+                        android.view.ViewConfiguration.getLongPressTimeout().toLong())
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (kotlin.math.abs(ev.x - downX) > touchSlop ||
+                        kotlin.math.abs(ev.y - downY) > touchSlop) {
+                        moved = true
+                        removeCallbacks(longPressCheck)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    onBubbleTouch?.invoke(false)
+                    removeCallbacks(longPressCheck)
+                    // 短按且未滑动、未触发长按才弹卡；长按已交给系统选字，不重复弹。
+                    if (!moved && !longPressFired) onSingleTap?.invoke()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    onBubbleTouch?.invoke(false)
+                    removeCallbacks(longPressCheck)
+                }
+            }
+            return super.dispatchTouchEvent(ev) // 不消费：系统长按选字/复制照常
+        }
+    }
+
     /** 单个气泡 View 的引用与已渲染内容，用于流式增量局部更新 */
     private class BubbleRef(
         val wrap: View,
         val body: TextView,
         val det: TextView?,
         val proc: TextView?,
+        val reasonDet: TextView?,
+        val reasonBody: TextView?,
         var structKey: String,
         var text: String,
         var process: String,
+        var reasoning: String,
     )
     /** 按消息索引缓存气泡，避免每个 token 重建整表（重建会让滚动位置乱跳） */
     private val bubbleRefs = mutableListOf<BubbleRef>()
@@ -115,7 +205,8 @@ class AiChatOverlay(
 
     /** Web 端新增回复的朗读回调（Activity 模式下注册，后台也保持） */
     private val remoteAssistantListener: (String) -> Unit = { text ->
-        // 按正文去重：Web 端轮询与本地 render 不会重复播同一条
+        // 注意：此回调运行在历史轮询协程（非主线程），speakAutoIfNew 内部会
+        // post 到主线程串行处理，与 render() 的朗读入口共用同一个去重状态。
         if (autoSpeak) speakAutoIfNew(text)
     }
 
@@ -123,6 +214,7 @@ class AiChatOverlay(
     private val configChangeListener: () -> Unit = {
         post {
             if (isAttachedToWindow && ::featMode.isInitialized) refreshFeatures()
+            if (::modeStrip.isInitialized) refreshModeStrip()
         }
     }
 
@@ -139,6 +231,20 @@ class AiChatOverlay(
      *   文字继续增长时会暂时领先于视口，正是「不紧跟、看得清」的效果。
      * - 流式结束后由整表重建分支用 fullScroll 一次性对齐最终底部。
      */
+    /**
+     * 纯滚动到底部，绝不调用 fullScroll(FOCUS_DOWN)。
+     * fullScroll 会把焦点转给滚区内第一个可聚焦的子 View——气泡是 selectable/focusable，
+     * 于是输入框失焦 → OnFocusChangeListener 收键盘。贴底时弹键盘恰好走这条路径，
+     * 表现为「一弹键盘就被强制关掉」。scrollTo 只改 scrollY，不碰焦点。
+     */
+    private fun scrollToBottomNoFocus() {
+        chatScroll.post {
+            val maxScroll = (chatList.height - chatScroll.height +
+                chatScroll.paddingTop + chatScroll.paddingBottom).coerceAtLeast(0)
+            chatScroll.scrollTo(chatScroll.scrollX, maxScroll)
+        }
+    }
+
     private fun followStreamScroll() {
         val now = System.currentTimeMillis()
         if (now - lastAutoScrollMs < autoScrollIntervalMs) return
@@ -164,6 +270,16 @@ class AiChatOverlay(
     /** 当前已经应用到窗口上的键盘高度（像素），0 表示未上移 */
     private var appliedImeHeight = 0
 
+    /**
+     * Activity 模式（adjustResize）下的键盘跟随：窗口高度会由系统压缩，输入行随之贴到
+     * 键盘上沿，但 ScrollView 的 scrollY 不会自动重新贴底 —— 键盘弹出可见区变小后，
+     * 末尾几条消息被挤到视口外，看起来「对话没跟随上升」。这里监听可见高度变化，
+     * 在用户本来就贴底（followIntent）时重新滚到底，键盘收起时同理恢复。
+     * 悬浮窗模式有 imeWatcher 自行压缩窗口，不需要这个监听。
+     */
+    private var imeScrollWatcher: ViewTreeObserver.OnGlobalLayoutListener? = null
+    private var lastVisibleHeight = 0
+
     init {
         isClickable = true
         setBackgroundColor(Color.parseColor("#F21A1A1A"))
@@ -185,13 +301,9 @@ class AiChatOverlay(
         val header = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(10), dp(10))
+            setPadding(dp(8), dp(10), dp(10), dp(10))
             setBackgroundColor(Color.parseColor("#FF242424"))
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-        val titleCol = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         headerTitle = TextView(context).apply {
             text = "会话标题"
@@ -208,10 +320,6 @@ class AiChatOverlay(
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
-        titleCol.addView(headerTitle)
-        titleCol.addView(headerSub)
-        header.addView(titleCol)
-
         // 头部操作按钮统一做成圆角描边 chip，贴合深色 UI
         fun headerChip(label: String, fg: String, onClick: () -> Unit): TextView =
             TextView(context).apply {
@@ -234,18 +342,29 @@ class AiChatOverlay(
                 }
             }
 
-        header.addView(headerChip("会话", "#FFFFCC88") { showSessionPicker() })
+        // 顺序：汉堡(最左) → 标题 → 联网/思考图标(右上) → 收起(最右)
+        // 汉堡去掉 chip 默认 leftMargin 贴左，但左右内边距保持对称，
+        // 让三条杠在按钮内居中，不会贴着按钮左边缘。
+        menuBtn = headerChip("☰", "#FF9EFFB0") { openDrawer() }.apply {
+            (layoutParams as? LinearLayout.LayoutParams)?.leftMargin = 0
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+        }
+        header.addView(menuBtn)
 
-        header.addView(headerChip("工具箱", "#FF9EFFB0") {
-            runCatching {
-                val i = android.content.Intent(context, CodexHubActivity::class.java)
-                i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(i)
-            }
-        })
+        val titleCol = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            // 与汉堡之间留合理间距，避免标题/计数器贴着图标
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = dp(10) }
+        }
+        titleCol.addView(headerTitle)
+        titleCol.addView(headerSub)
+        header.addView(titleCol)
 
-        settingsToggle = headerChip("设置", "#FF88CCFF") { toggleSettings() }
-        header.addView(settingsToggle)
+        quickSearchBtn = headerChip("🌐", "#FF9AA5A0") { toggleQuick("search") }
+        header.addView(quickSearchBtn)
+        quickThinkBtn = headerChip("🧠", "#FF9AA5A0") { toggleQuick("think") }
+        header.addView(quickThinkBtn)
 
         closeBtn = headerChip("收起 ⌄", "#FFCCCCCC") {
             if (onClose != null) onClose.invoke() else hide()
@@ -296,8 +415,9 @@ class AiChatOverlay(
             }
 
         featAuto = featureButton().apply { setOnClickListener { toggleAutoSpeak() } }
-        featSearch = featureButton().apply { setOnClickListener { toggleQuick("search") } }
-        featThink = featureButton().apply { setOnClickListener { toggleQuick("think") } }
+        // 设置面板 = 模式级默认（新会话与 Web 端都跟随）；顶栏 chip = 本会话临时覆盖。
+        featSearch = featureButton().apply { setOnClickListener { setModeDefault("search") } }
+        featThink = featureButton().apply { setOnClickListener { setModeDefault("think") } }
         featMode = featureButton().apply { setOnClickListener { showModePicker() } }
         featAttach = featureButton().apply {
             setOnClickListener {
@@ -319,7 +439,9 @@ class AiChatOverlay(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(52)
         ).apply { topMargin = dp(6) })
         settingsPanel.addView(featureView)
-        root.addView(settingsPanel)
+        // 快捷开关面板已移除：联网/思考在顶栏图标、模式在模式条、附件在输入行，
+        // 自动朗读移到抽屉系统组。settingsPanel 保留为内存对象仅供 refreshFeatures
+        // 复用状态文案，不再挂进界面树。
 
         // ---- chat list ----
         chatList = LinearLayout(context).apply {
@@ -398,6 +520,20 @@ class AiChatOverlay(
             }
         }
         inputRow.addView(inputBox)
+        // 附件入口移到输入行，与 Web 端 .attachBtn 对齐，不必再展开功能面板
+        val attachBtn = TextView(context).apply {
+            text = "📎"
+            textSize = 15f
+            setTextColor(Color.parseColor("#FFB8C6D8"))
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(9), dp(6), dp(9))
+            setOnClickListener {
+                dismissKeyboard()
+                if (onPickFile != null) onPickFile.invoke()
+                else Toast.makeText(context, "请在会话页使用添加文件", Toast.LENGTH_SHORT).show()
+            }
+        }
+        inputRow.addView(attachBtn)
         sendBtn = TextView(context).apply {
             text = "发送"
             textSize = 13f
@@ -411,10 +547,71 @@ class AiChatOverlay(
             setOnClickListener { submit() }
         }
         inputRow.addView(sendBtn)
+
+        // ---- 工作模式条：对齐 Web 端 .modeSeg，五个模式横滑；点当前项不再弹列表 ----
+        val modeStripScroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(Color.parseColor("#FF242424"))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        modeStrip = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(10), dp(3), dp(10), dp(5))
+        }
+        AiConsoleClient.MODE_DEFAULTS.keys.forEach { key ->
+            val btn = TextView(context).apply {
+                textSize = 11f
+                setPadding(dp(10), dp(5), dp(10), dp(5))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = dp(6) }
+                setOnClickListener {
+                    dismissKeyboard()
+                    if (AiConsoleClient.currentMode() == key) {
+                        // 重复点当前模式不再弹选择列表：模式条本身就是选择器，
+                        // 需要编辑配置走抽屉里的设置入口即可。
+                        refreshModeStrip()
+                    } else {
+                        AiConsoleClient.setMode(key) { ok, msg ->
+                            Toast.makeText(context, if (ok) "已切换：$msg" else msg, Toast.LENGTH_SHORT).show()
+                            refreshModeStrip()
+                            refreshFeatures()
+                        }
+                        refreshModeStrip()
+                    }
+                }
+            }
+            modeStripButtons.add(btn)
+            modeStrip.addView(btn)
+        }
+        modeStripScroll.addView(modeStrip)
+        root.addView(modeStripScroll)
         root.addView(inputRow)
 
-        addView(root)
+        // ---- 侧边抽屉：包在内容区之上，绝不放进 chatList（气泡索引依赖 child index）----
+        val outer = FrameLayout(context).apply {
+            layoutParams = LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setBackgroundColor(Color.parseColor("#F21A1A1A"))
+            addView(root)
+        }
+        drawerMask = View(context).apply {
+            visibility = GONE
+            alpha = 0f
+            setBackgroundColor(Color.parseColor("#99000000"))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setOnClickListener { closeDrawer() }
+        }
+        outer.addView(drawerMask)
+        drawerWidth = (resources.displayMetrics.widthPixels * 0.82f)
+            .roundToInt().coerceAtMost(dp(272))
+        drawer = buildDrawer()
+        outer.addView(drawer)
+        addView(outer)
         refreshFeatures()
+        refreshModeStrip()
     }
 
     private fun submit() {
@@ -435,6 +632,465 @@ class AiChatOverlay(
         }
     }
 
+    // ---- 侧边抽屉：对齐 Web 端窄屏 off-canvas 侧栏 ----
+
+    /** 构建抽屉 View。它是内容 root 的兄弟节点，不进入 chatList，气泡索引不受影响。 */
+    private fun buildDrawer(): LinearLayout {
+        val ctx = context
+        val d = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = GONE
+            translationX = -drawerWidth.toFloat()
+            setBackgroundColor(Color.parseColor("#FF1B1B1C"))
+            elevation = 16f
+            layoutParams = FrameLayout.LayoutParams(
+                drawerWidth, ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply { gravity = Gravity.START }
+        }
+        fun dText(text: String, size: Float, color: String) = TextView(ctx).apply {
+            this.text = text
+            textSize = size
+            setTextColor(Color.parseColor(color))
+        }
+
+        d.addView(dText("CODEX  ·  工作区", 15f, "#FFFFFFFF").apply {
+            setPadding(dp(16), dp(16), dp(12), dp(8))
+        })
+        // 顶部两行各自独立成行、统一用 LinearLayout.LayoutParams，避免两个 view 视觉重叠
+        // （之前的写法让「新建会话」紧贴搜索框，看起来像挤进了搜索栏）。
+        fun topRow(label: String, size: Float, color: String, radius: Int, bg: String,
+                   marginTop: Int, onClick: () -> Unit) =
+            dText(label, size, color).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(dp(14), dp(11), dp(14), dp(11))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(radius).toFloat()
+                    setColor(Color.parseColor(bg))
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    leftMargin = dp(12); rightMargin = dp(12); topMargin = dp(marginTop)
+                }
+                setOnClickListener {
+                    closeDrawer()
+                    dismissKeyboard()
+                    onClick()
+                }
+            }
+
+        // 搜索真正内嵌进抽屉：这里是可输入的 EditText，命中结果直接替换下方会话区，
+        // 不再只是点开对话框的"假搜索栏"。命中消息可点开并滚动定位到对话里的原消息。
+        drawerSearchInput = EditText(ctx).apply {
+            hint = "🔍  搜索会话 / 历史内容"
+            setHintTextColor(Color.parseColor("#77FFFFFF"))
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            inputType = InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            setPadding(dp(14), dp(11), dp(14), dp(11))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#FF2A2A2C"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(12); rightMargin = dp(12); topMargin = dp(2) }
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val q = s?.toString()?.trim().orEmpty()
+                    drawerSearchRunnable?.let { drawerSearchHandler.removeCallbacks(it) }
+                    if (q.isBlank()) {
+                        drawerSearchRunnable = null
+                        loadDrawerSessions()
+                    } else {
+                        val task = Runnable { searchDrawerSessions(q) }
+                        drawerSearchRunnable = task
+                        drawerSearchHandler.postDelayed(task, 300L)
+                    }
+                }
+            })
+        }
+        d.addView(drawerSearchInput)
+        d.addView(topRow("＋  新建会话", 12.5f, "#FFDCE6FF", 100, "#FF243055", 10) {
+            AiConsoleClient.newSession { ok, msg ->
+                Toast.makeText(ctx, if (ok) "已新建会话" else msg, Toast.LENGTH_SHORT).show()
+                refreshModeStrip()
+                refreshFeatures()
+            }
+        })
+
+        val scroller = ScrollView(ctx).apply {
+            isVerticalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            ).apply { topMargin = dp(6) }
+        }
+        val box = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(2), dp(10), dp(14))
+        }
+        scroller.addView(box, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        d.addView(scroller)
+
+        fun section(title: String) {
+            box.addView(dText(title, 10f, "#FF81858C").apply {
+                setPadding(dp(8), dp(12), dp(8), dp(4))
+            })
+        }
+        fun item(label: String, onClick: () -> Unit) {
+            box.addView(dText(label, 12.5f, "#FFD6D9DE").apply {
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(9).toFloat()
+                    setColor(Color.parseColor("#FF242426"))
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(2) }
+                setOnClickListener {
+                    closeDrawer()
+                    dismissKeyboard()
+                    onClick()
+                }
+            })
+        }
+        fun openHub(page: String? = null) {
+            runCatching {
+                val i = android.content.Intent(ctx, CodexHubActivity::class.java)
+                if (page != null) i.putExtra(CodexHubActivity.EXTRA_PAGE, page)
+                i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                ctx.startActivity(i)
+            }.onFailure {
+                Toast.makeText(ctx, "打开工具箱失败：${it.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // 会话区紧跟「新建会话」按钮：进入抽屉第一眼就是可切换的会话列表
+        section("会话")
+        drawerSessionBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(drawerSessionBox)
+        box.addView(dText("与 CodexWeb 共用同一批会话", 10f, "#FF6E737A").apply {
+            setPadding(dp(10), dp(8), dp(10), dp(4))
+        })
+
+        section("工作区")
+        item("对话 · 当前") { }
+        item("工具箱") { openHub() }
+        item("文件管理") { openHub("文件") }
+        section("工具箱")
+        item("网络抓包") { openHub("抓包") }
+        item("APK 工具") { openHub("APK") }
+        item("技能") { openHub("技能") }
+        item("手机控制") { openHub("手机") }
+        item("提示词库") { openHub("提示词") }
+        section("系统")
+        item("会话管理") { openHub("会话") }
+        drawerAutoItem = dText(if (autoSpeak) "🔊 自动朗读：开" else "🔊 自动朗读：关",
+            12.5f, "#FFD6D9DE").apply {
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(Color.parseColor("#FF242426"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(2) }
+            setOnClickListener {
+                closeDrawer()
+                dismissKeyboard()
+                toggleAutoSpeak()
+            }
+        }
+        box.addView(drawerAutoItem)
+        item("设置") { openHub("设置") }
+        item("使用说明") { openHub("说明") }
+
+        drawerBalanceItem = dText("💰 余额 … · 点击刷新", 11f, "#FFE0C27A").apply {
+            setPadding(dp(14), dp(8), dp(12), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(Color.parseColor("#FF242426"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(12); rightMargin = dp(12); topMargin = dp(8) }
+            setOnClickListener { refreshBalance() }
+        }
+        d.addView(drawerBalanceItem)
+        d.addView(dText("●  与 CodexWeb 实时同步", 10f, "#FF7DD4A8").apply {
+            setPadding(dp(16), dp(10), dp(12), dp(14))
+        })
+        return d
+    }
+
+    /** 拉取账户余额并刷新抽屉底部的余额行；走后端 /api/balance，Key 不下发。 */
+    private fun refreshBalance() {
+        if (balanceBusy || !::drawerBalanceItem.isInitialized) return
+        balanceBusy = true
+        drawerBalanceItem.text = "💰 余额 查询中…"
+        AiConsoleClient.api("GET", "/api/balance") { resp ->
+            balanceBusy = false
+            if (!::drawerBalanceItem.isInitialized) return@api
+            try {
+                if (resp == null) {
+                    // 区分失败原因：旧后端没有 /api/balance 会返回 404，
+                    // 这是「Web 看不到余额行 + AI 窗点重试」同时出现的根因。
+                    // 把真实错误显示出来，避免用户只看到无意义的「点击重试」。
+                    val raw = AiConsoleClient.apiError()
+                    val hint = when {
+                        raw.contains("404") -> "后端版本过低，请升级 CodexWeb"
+                        raw.contains("401") -> "连接已过期，请重新打开 AI 窗"
+                        raw.contains("Failed") || raw.contains("timeout", true) ||
+                            raw.contains("connect", true) -> "无法连接后端"
+                        else -> raw.take(18).ifBlank { "查询失败" }
+                    }
+                    drawerBalanceItem.text = "💰 余额 · $hint"
+                    drawerBalanceItem.setTextColor(Color.parseColor("#FFE57373"))
+                    return@api
+                }
+                val ok = resp.optBoolean("ok")
+                if (!ok) {
+                    val unsupported = resp.optBoolean("unsupported")
+                    val err = resp.optString("error")
+                    drawerBalanceItem.text = if (unsupported) "💰 余额 · 仅官方接口支持"
+                    else "💰 余额 · ${err.take(20).ifBlank { "查询失败" }}"
+                    drawerBalanceItem.setTextColor(Color.parseColor("#FFE57373"))
+                    return@api
+                }
+                val items = resp.optJSONArray("items")
+                if (items == null || items.length() == 0) {
+                    drawerBalanceItem.text = "💰 余额 — · 点击刷新"
+                    return@api
+                }
+                val first = items.optJSONObject(0)
+                val cur = first?.optString("currency") ?: "CNY"
+                val total = first?.optString("total") ?: "0"
+                val sym = if (cur == "USD") "$" else "¥"
+                val amount = total.toDoubleOrNull()?.let { String.format("%.2f", it) } ?: total
+                val avail = resp.optBoolean("available", true)
+                val suffix = if (!avail) " · 余额不足" else " · 点击刷新"
+                drawerBalanceItem.text = "💰 余额 $sym$amount${
+                    if (cur == "USD") " USD" else ""
+                }$suffix"
+                drawerBalanceItem.setTextColor(Color.parseColor("#FFE0C27A"))
+            } catch (_: Exception) {
+                drawerBalanceItem.text = "💰 余额 — · 点击重试"
+            }
+        }
+    }
+
+    private fun openDrawer() {
+        if (drawerOpen || !::drawer.isInitialized) return
+        dismissKeyboard()
+        drawerOpen = true
+        drawer.visibility = VISIBLE
+        drawerMask.visibility = VISIBLE
+        drawer.animate().translationX(0f).setDuration(200).start()
+        drawerMask.animate().alpha(1f).setDuration(200).start()
+        val q = if (::drawerSearchInput.isInitialized) drawerSearchInput.text.toString().trim() else ""
+        if (q.isBlank()) loadDrawerSessions() else searchDrawerSessions(q)
+        refreshBalance()
+    }
+
+    private fun closeDrawer() {
+        if (!drawerOpen || !::drawer.isInitialized) return
+        drawerOpen = false
+        drawer.animate().translationX(-drawerWidth.toFloat()).setDuration(180)
+            .withEndAction { if (!drawerOpen) drawer.visibility = GONE }.start()
+        drawerMask.animate().alpha(0f).setDuration(180)
+            .withEndAction { if (!drawerOpen) drawerMask.visibility = GONE }.start()
+    }
+
+    /** 抽屉里的会话列表：置顶优先、最近在后，与 Web 侧栏顺序一致 */
+    private fun loadDrawerSessions() {
+        val seq = ++drawerSearchSeq // 让尚在飞行的搜索结果失效，避免清空后旧结果回灌
+        AiConsoleClient.loadSessions { list ->
+            post {
+                if (seq != drawerSearchSeq || !::drawerSessionBox.isInitialized) return@post
+                drawerSessionBox.removeAllViews()
+                val cur = AiConsoleClient.currentSessionId()
+                val rows = list.sortedWith(
+                    compareByDescending<AiConsoleClient.SessionItem> { it.pinned }
+                        .thenByDescending { it.mtime }
+                ).take(16)
+                if (rows.isEmpty()) {
+                    drawerSessionBox.addView(TextView(context).apply {
+                        text = "暂无会话"
+                        textSize = 11f
+                        setTextColor(Color.parseColor("#FF81858C"))
+                        setPadding(dp(10), dp(10), dp(10), dp(10))
+                    })
+                }
+                rows.forEach { s ->
+                    val active = s.id == cur
+                    drawerSessionBox.addView(TextView(context).apply {
+                        text = (if (active) "● " else "○ ") + s.title.ifBlank { s.id.take(8) }
+                        textSize = 12f
+                        setTextColor(Color.parseColor(if (active) "#FF9FE1CB" else "#FFB6BAC0"))
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                        setPadding(dp(10), dp(8), dp(10), dp(8))
+                        background = GradientDrawable().apply {
+                            cornerRadius = dp(8).toFloat()
+                            setColor(Color.parseColor(if (active) "#FF143A31" else "#FF242426"))
+                        }
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { topMargin = dp(2) }
+                        setOnClickListener {
+                            closeDrawer()
+                            dismissKeyboard()
+                            if (active) return@setOnClickListener
+                            AiConsoleClient.switchSession(s.id, s.mode) { ok, msg ->
+                                Toast.makeText(context, if (ok) "已切换会话" else msg,
+                                    Toast.LENGTH_SHORT).show()
+                                refreshModeStrip()
+                                refreshFeatures()
+                            }
+                        }
+                    })
+                }
+            }
+        }
+    }
+
+    /**
+     * 抽屉内嵌搜索：直接把后端全局搜索结果渲染进抽屉会话区，
+     * 每条命中消息可点击 → 切会话 → 在对话里滚动定位并高亮（与会话对话框同一套逻辑）。
+     */
+    private fun searchDrawerSessions(q: String) {
+        val seq = ++drawerSearchSeq
+        AiConsoleClient.api("GET", "/api/sessions/search?q=${AiConsoleClient.urlEncode(q)}") { resp ->
+            post {
+                if (seq != drawerSearchSeq || !::drawerSessionBox.isInitialized) return@post
+                drawerSessionBox.removeAllViews()
+                val arr = resp?.optJSONArray("results") ?: org.json.JSONArray()
+                if (arr.length() == 0) {
+                    drawerSessionBox.addView(TextView(context).apply {
+                        text = "没有匹配「$q」的会话"
+                        textSize = 11f
+                        setTextColor(Color.parseColor("#FF81858C"))
+                        setPadding(dp(10), dp(14), dp(10), dp(14))
+                    })
+                    return@post
+                }
+                val terms = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val sid = o.optString("id")
+                    val matched = o.optJSONArray("matched_in")?.let { ma ->
+                        (0 until ma.length()).joinToString("、") { ma.optString(it) }
+                    }.orEmpty()
+                    val hits = mutableListOf<SearchHit>()
+                    o.optJSONArray("hits")?.let { ha ->
+                        for (k in 0 until ha.length()) {
+                            val h = ha.optJSONObject(k) ?: continue
+                            hits.add(SearchHit(h.optString("role"), h.optString("text"), terms))
+                        }
+                    }
+                    val row = SessionRow(
+                        id = sid, title = o.optString("title"), mode = o.optString("mode", "chat"),
+                        mtime = o.optLong("mtime"), snippet = o.optString("snippet"),
+                        matched = matched, hits = hits,
+                    )
+                    val card = LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        isClickable = true
+                        setPadding(dp(10), dp(8), dp(10), dp(8))
+                        background = GradientDrawable().apply {
+                            cornerRadius = dp(9).toFloat()
+                            setColor(Color.parseColor("#FF252528"))
+                        }
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { topMargin = dp(3) }
+                        setOnClickListener {
+                            closeDrawer()
+                            dismissKeyboard()
+                            if (sid == AiConsoleClient.currentSessionId()) return@setOnClickListener
+                            AiConsoleClient.switchSession(sid, row.mode) { ok, msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                if (ok) forceScrollNext = true
+                            }
+                        }
+                    }
+                    card.addView(TextView(context).apply {
+                        val label0 = row.title.ifBlank { sid }
+                        val n0 = if (hits.isNotEmpty()) "  [${hits.size} 条命中]" else ""
+                        text = "○ $label0$n0"
+                        textSize = 12f
+                        setTextColor(Color.WHITE)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    })
+                    if (matched.isNotBlank()) card.addView(TextView(context).apply {
+                        text = "命中于：$matched"
+                        textSize = 10f
+                        setTextColor(Color.parseColor("#FF9EFFB0"))
+                    })
+                    val roleLabel = mapOf("user" to "我", "assistant" to "AI")
+                    hits.forEach { hit ->
+                        card.addView(TextView(context).apply {
+                            text = "▸ ${roleLabel[hit.role] ?: hit.role}：${hit.text}"
+                            textSize = 11f
+                            setTextColor(Color.parseColor("#FFCCAA88"))
+                            maxLines = 3
+                            ellipsize = TextUtils.TruncateAt.END
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            background = GradientDrawable().apply {
+                                cornerRadius = dp(6).toFloat()
+                                setColor(Color.parseColor("#FF1B1B1B"))
+                            }
+                            setOnClickListener {
+                                closeDrawer()
+                                dismissKeyboard()
+                                jumpToHit(row, hit)
+                            }
+                        }, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { topMargin = dp(4) })
+                    }
+                    if (hits.isEmpty() && row.snippet.isNotBlank()) card.addView(TextView(context).apply {
+                        text = "  “${row.snippet.take(160)}”"
+                        textSize = 11f
+                        setTextColor(Color.parseColor("#FFCCAA88"))
+                        maxLines = 2
+                        ellipsize = TextUtils.TruncateAt.END
+                    })
+                    drawerSessionBox.addView(card)
+                }
+            }
+        }
+    }
+
+    /** 模式条高亮跟随当前模式；配置改名后也走这里同步显示 */
+    private fun refreshModeStrip() {
+        if (!::modeStrip.isInitialized) return
+        val keys = AiConsoleClient.MODE_DEFAULTS.keys.toList()
+        val cur = AiConsoleClient.currentMode()
+        keys.forEachIndexed { i, key ->
+            val b = modeStripButtons.getOrNull(i) ?: return@forEachIndexed
+            val on = key == cur
+            b.text = AiConsoleClient.modeLabel(key).take(8) + if (on) " ●" else ""
+            b.setTextColor(Color.parseColor(if (on) "#FFFFFFFF" else "#FFA8B0B8"))
+            (b.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (on) "#FF355E52" else "#FF303030"))
+        }
+        modeStripButtons.getOrNull(keys.indexOf(cur))?.let { btn ->
+            (modeStrip.parent as? HorizontalScrollView)?.smoothScrollTo(
+                (btn.left - dp(24)).coerceAtLeast(0), 0)
+        }
+    }
+
     private fun toggleSettings() {
         settingsPanel.visibility = if (settingsPanel.visibility == VISIBLE) GONE else VISIBLE
         refreshFeatures()
@@ -448,11 +1104,24 @@ class AiChatOverlay(
         featSearch.text = if (cfg.search) "🌐 联网搜索\n开" else "🌐 联网搜索\n关"
         featThink.text = if (cfg.think) "🧠 深度思考\n开" else "🧠 深度思考\n关"
         featMode.text = "🛠 工作模式\n${modeLabel.take(10)}"
+        // 顶栏图标：开启时高亮描边，关闭时压暗，点一下即切换（与 Web .toggles 同源）
+        fun tintQuickIcon(btn: TextView, on: Boolean) {
+            btn.setTextColor(Color.parseColor(if (on) "#FF9EFFB0" else "#FF8A8A8A"))
+            (btn.background as? GradientDrawable)?.setStroke(
+                dp(1), Color.parseColor(if (on) "#FF3B7D6B" else "#FF454545"))
+            (btn.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (on) "#FF1E3830" else "#FF303030"))
+        }
+        if (::quickSearchBtn.isInitialized) tintQuickIcon(quickSearchBtn, cfg.search)
+        if (::quickThinkBtn.isInitialized) tintQuickIcon(quickThinkBtn, cfg.think)
+        if (::drawerAutoItem.isInitialized) {
+            drawerAutoItem.text = if (autoSpeak) "🔊 自动朗读：开" else "🔊 自动朗读：关"
+        }
         val count = AiConsoleClient.attachmentCount()
         featAttach.text = if (count > 0) "📎 添加文件\n$count 个待发送" else "📎 添加文件"
         val summary = AiConsoleClient.attachmentSummary()
         featureView.text = if (summary.isBlank())
-            "快速开关仅本会话生效 · 服务器地址在工具箱设置"
+            "面板开关=模式默认（新会话/Web 同步）· 顶栏图标=仅本会话"
         else "待发送附件：$summary（点此清空）"
         featureView.setOnClickListener {
             if (AiConsoleClient.attachmentCount() > 0) {
@@ -487,6 +1156,18 @@ class AiChatOverlay(
         dismissKeyboard()
         AiConsoleClient.toggleQuick(kind) { ok, msg ->
             Toast.makeText(context, if (ok) msg else msg, Toast.LENGTH_SHORT).show()
+            refreshFeatures()
+        }
+        refreshFeatures()
+    }
+
+    /** 设置面板开关：写模式默认 + 清本会话覆盖，新会话与 Web 端都会跟随 */
+    private fun setModeDefault(kind: String) {
+        dismissKeyboard()
+        val enabled = if (kind == "think") AiConsoleClient.effectiveCfg().think
+            else AiConsoleClient.effectiveCfg().search
+        AiConsoleClient.setModeDefault(kind, !enabled) { ok, msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             refreshFeatures()
         }
         refreshFeatures()
@@ -568,30 +1249,49 @@ class AiChatOverlay(
         }
     }
 
-    /** 只朗读尚未播过的新回复：本地流式完成与 Web 轮询都走这里，按正文去重 */
+    /**
+     * 只朗读尚未播过的新回复：本地流式完成与 Web 轮询都走这里，按正文去重。
+     * 所有调用方（含非主线程的轮询回调）都 post 到主线程串行执行：把"比较 lastSpokenText
+     * → 更新 → speak"合成一个不可打断的主线程块，消除后台并发重复朗读的竞态。
+     */
     private fun speakAutoIfNew(text: String) {
-        if (!autoSpeak || text.isBlank()) return
-        if (text == lastSpokenText) return
-        lastSpokenText = text
-        speakAuto(text)
+        if (text.isBlank()) return
+        post {
+            if (!autoSpeak || text.isBlank()) return@post
+            if (text == lastSpokenText) return@post
+            lastSpokenText = text
+            speakAuto(text)
+        }
     }
 
-    /** 会话变化时把已有末尾回复设为基线：翻开旧会话不念历史，新会话空历史则基线为空 */
+    /**
+     * 会话变化时把已有末尾回复设为基线：翻开旧会话不念历史，新会话空历史则基线为空。
+     * 同样 post 到主线程，保证与 speakAutoIfNew 的串行顺序一致——否则轮询线程可能
+     * 在基线重设后又用旧文本朗读一次。
+     */
     private fun syncSpokenBaseline(sid: String?) {
-        if (sid == lastSpokenSid) return
-        lastSpokenSid = sid
-        lastSpokenText = messagesSnapshot.lastOrNull {
-            it.role == "assistant" && !it.failed && it.text.isNotBlank()
-        }?.text
+        post {
+            if (sid == lastSpokenSid) return@post
+            lastSpokenSid = sid
+            lastSpokenText = messagesSnapshot.lastOrNull {
+                it.role == "assistant" && !it.failed && it.text.isNotBlank()
+            }?.text
+        }
     }
 
     /** 回复完成后自动朗读（本地 TTS，不上传音频） */
     private fun speakAuto(text: String) {
         if (!autoSpeak || text.isBlank()) return
-        pendingAutoText = text
         val engine = autoTts
-        if (engine == null) ensureAutoTts()
-        else engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "auto")
+        if (engine == null) {
+            // 引擎尚未就绪，等初始化回调里播；不要在引擎已就绪时残留 pending，
+            // 否则下次重建引擎时会把旧文本再念一遍。
+            pendingAutoText = text
+            ensureAutoTts()
+        } else {
+            pendingAutoText = null
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "auto")
+        }
     }
 
     private fun stopAutoTts() {
@@ -906,7 +1606,8 @@ class AiChatOverlay(
     private fun applyPendingJump() {
         val hit = pendingJump ?: return
         val idx = messagesSnapshot.indexOfFirst { m ->
-            m.role == hit.role && hit.terms.all { t -> m.text.contains(t, true) }
+            (hit.role.isBlank() || m.role == hit.role) &&
+                hit.terms.all { t -> m.text.contains(t, true) }
         }
         if (idx < 0) {
             pendingJump = null
@@ -952,8 +1653,9 @@ class AiChatOverlay(
     }
 
     fun show() {
-        if (manageWindow) addStandaloneWindow()
+        if (manageWindow) addStandaloneWindow() else attachImeScrollWatcher()
         visibility = VISIBLE
+        closeDrawer()
         // 后台期间消息可能已被 Web 端改写，旧操作卡的 index/text 不可信，回前台先收掉
         dismissInlinePanel()
         forceRebuildNext = true
@@ -966,6 +1668,7 @@ class AiChatOverlay(
 
     fun hide() {
         if (manageWindow) removeStandaloneWindow()
+        closeDrawer()
         visibility = GONE
         AiConsoleClient.removeListener(renderListener)
         // 这里不再 stopAutoTts()：切后台只收 UI，自动朗读应继续播完当前回复。
@@ -977,6 +1680,8 @@ class AiChatOverlay(
         AiConsoleClient.removeListener(renderListener)
         AiConsoleClient.removeRemoteAssistantListener(remoteAssistantListener)
         AiConsoleClient.removeConfigListener(configChangeListener)
+        imeScrollWatcher?.let { runCatching { viewTreeObserver.removeOnGlobalLayoutListener(it) } }
+        imeScrollWatcher = null
         dismissInlinePanel()
         stopAutoTts()
     }
@@ -1069,6 +1774,41 @@ class AiChatOverlay(
         viewTreeObserver.addOnGlobalLayoutListener(listener)
     }
 
+    /**
+     * Activity 模式的键盘跟随：系统 adjustResize 压缩窗口后，输入行到了键盘上沿，
+     * 但 ScrollView 的 scrollY 保持原值，末尾消息被顶出视口。这里在可见高度变化时，
+     * 若用户本来就贴底（followIntent）就重新滚到底；键盘收起后同理恢复到底部。
+     * 阈值过滤掉状态栏/导航栏等微小变化，只对真正的键盘开合做出响应。
+     */
+    private fun attachImeScrollWatcher() {
+        if (manageWindow || imeScrollWatcher != null) return
+        val listener = object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                if (!isAttachedToWindow || visibility != VISIBLE) return
+                val frame = Rect()
+                getWindowVisibleDisplayFrame(frame)
+                val h = frame.height()
+                if (lastVisibleHeight == 0) { lastVisibleHeight = h; return }
+                val delta = kotlin.math.abs(h - lastVisibleHeight)
+                if (delta < dp(80)) return // 非键盘引起的高度变化（状态栏等）忽略
+                // 必须在更新 lastVisibleHeight 之前算出视口压缩量：
+                // shrink>0 键盘弹出（视口变矮），shrink<0 键盘收起（视口恢复）。
+                val shrink = lastVisibleHeight - h
+                lastVisibleHeight = h
+                if (followIntent) {
+                    scrollToBottomNoFocus()
+                } else {
+                    // 用户上翻查看历史时不强制贴底，但把 scrollY 按视口压缩量同步回补，
+                    // 让原本贴着输入行的内容继续贴在键盘上沿——即对话随键盘高度定位。
+                    // scrollBy 会被系统 clamp 到 [0, maxScroll]，不会滚出边界。
+                    if (shrink != 0) chatScroll.scrollBy(0, shrink)
+                }
+            }
+        }
+        imeScrollWatcher = listener
+        viewTreeObserver.addOnGlobalLayoutListener(listener)
+    }
+
     /** 输入框一旦获得焦点就弹键盘（含用户手动点击输入框的情况） */
     private fun showKeyboardForInput() {
         if (!isAttachedToWindow || visibility != VISIBLE) return
@@ -1127,28 +1867,58 @@ class AiChatOverlay(
     }
 
     /**
-     * 回复里提到其它工作模式时（典型：「请切换到手机控制模式」），
-     * 直接在气泡下方给出切换按钮，用户不用再去设置面板里找。
-     * 排除当前模式，避免显示无意义的「切到当前模式」。
+     * 工具箱全局搜索命中后跳转：设置定位意图，历史加载完成时 render() 自动滚动高亮。
+     * terms 是搜索词（空格分隔），role 为空则不限角色。
      */
+    fun requestJump(role: String, terms: String) {
+        val list = terms.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (list.isEmpty()) return
+        pendingJump = SearchHit(role = role, text = terms, terms = list)
+        if (messagesSnapshot.isNotEmpty()) post { applyPendingJump() }
+    }
+
+    /**
+     * 气泡下的模式按钮：按用户策略 + 当前模式的真实能力动态决定。
+     * 模式自定义后（例如纯对话开了联网、轻量关了联网），这里会立即跟着变，
+     * 不再写死「chat 没工具 / lite 有工具」这类过时假设。
+     */
+    private val cliIntentRe = Regex(
+        "运行一下|执行一下|帮我(执行|运行|编译|打包|改文件|写文件|读文件)|" +
+            "写入文件|保存到文件|读取文件|修改文件|创建文件|删除文件|" +
+            "编译|打包|抓包|反编译|git\\s+(commit|push|clone)"
+    )
+    private val searchIntentRe = Regex("联网搜|搜索一下|查一下最新|最新消息|实时数据|打开(网页|链接|网站)")
+    private val explainOnlyRe = Regex("解释|什么是|为什么|区别|原理|什么意思|讲讲|翻译|润色|举个例子|这段代码")
+    private val capLimitRe = Regex(
+        "无法|不能|没有(工具|权限|能力)|不支持|仅能|只能|受限|建议切换|需要切换|请切换|改用|换成"
+    )
+
     private fun suggestedModes(text: String): List<String> {
         // 流式输出期间不插按钮：否则关键词刚出现时 structKey 变化会整表重建，造成跳动。
         // 运行结束后状态刷新会自然触发一次重建，按钮随最终文本出现。
         if (AiConsoleClient.running || text.isBlank()) return emptyList()
-        // 默认名 + 用户自定义名都能触发（如把自定义改名成「写周报」，回复里提到也识别）
-        val hints = AiConsoleClient.MODE_DEFAULTS.keys.associateWith { key ->
-            listOf(AiConsoleClient.modeLabel(key), AiConsoleClient.MODE_DEFAULTS[key]?.name.orEmpty())
-                .filter { it.isNotBlank() }
-        }
+        val cfg = AiConsoleClient.suggestCfg()
+        if (cfg.policy == "off" || explainOnlyRe.containsMatchIn(text)) return emptyList()
+        val need = mutableListOf<String>()
+        if (cliIntentRe.containsMatchIn(text)) need += "cli"
+        if (searchIntentRe.containsMatchIn(text)) need += "search"
+        if (need.isEmpty()) return emptyList()
         val current = AiConsoleClient.currentMode()
-        return AiConsoleClient.MODE_DEFAULTS.keys.filter { key ->
-            key != current && hints[key]?.any { text.contains(it) } == true
-        }
+        // 当前模式已具备所需能力 —— 用户正在合适的模式做合适的事，不打扰。
+        val miss = need.filter { !AiConsoleClient.modeCan(current, it) }
+        if (miss.isEmpty()) return emptyList()
+        // 保守档仍需助手明确说做不到；主动档识别到意图即可。
+        if (cfg.policy == "cautious" && !capLimitRe.containsMatchIn(text)) return emptyList()
+        val order = AiConsoleClient.MODE_DEFAULTS.keys.toList()
+        return order.filter { key ->
+            key != current && miss.all { c -> AiConsoleClient.modeCan(key, c) }
+        }.sortedWith(compareBy({ it != cfg.preferred }, { order.indexOf(it) })).take(2)
     }
 
     /** 决定气泡 View 结构是否需要新建的签名：正文/过程文本的变化不在此列 */
     private fun structKeyOf(m: ChatMessage): String =
-        "${m.role}|${m.failed}|${m.process.isNotBlank()}|${suggestedModes(m.text).joinToString(",")}"
+        "${m.role}|${m.failed}|${m.process.isNotBlank()}|${m.reasoning.isNotBlank()}|" +
+            "${m.sources.isNotEmpty()}|" + suggestedModes(m.text).joinToString(",")
 
     private fun render() {
         messagesSnapshot = AiConsoleClient.messages
@@ -1185,7 +1955,7 @@ class AiChatOverlay(
 
         // 统一滚动策略：强制场景瞬间到底；流式跟随走节流平滑，避免窗口乱跳。
         fun applyScroll() {
-            if (forceNow) chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+            if (forceNow) scrollToBottomNoFocus()
             else if (followIntent) followStreamScroll()
         }
 
@@ -1212,9 +1982,12 @@ class AiChatOverlay(
                     body = body,
                     det = v.findViewWithTag("ai_proc_det") as? TextView,
                     proc = v.findViewWithTag("ai_proc_body") as? TextView,
+                    reasonDet = v.findViewWithTag("ai_reason_det") as? TextView,
+                    reasonBody = v.findViewWithTag("ai_reason_body") as? TextView,
                     structKey = structKeyOf(msg),
                     text = msg.text,
                     process = msg.process,
+                    reasoning = msg.reasoning,
                 ))
             }
             renderedSid = sid
@@ -1238,6 +2011,15 @@ class AiChatOverlay(
                 ref.proc?.text = m.process
                 ref.det?.text = "▸ 过程（${m.process.lineCount()} 步）"
                 ref.process = m.process
+            }
+            if (m.reasoning != ref.reasoning) {
+                ref.reasonBody?.text = m.reasoning
+                // 思考文本还在增长时保留用户已展开的状态，别把标题打回收起文案
+                val expanded = ref.reasonBody?.visibility == VISIBLE
+                ref.reasonDet?.text = if (expanded)
+                    "▾ 已深度思考（${m.reasoning.length} 字）"
+                else "🧠 已深度思考（${m.reasoning.length} 字）"
+                ref.reasoning = m.reasoning
             }
         }
         applyScroll()
@@ -1285,8 +2067,17 @@ class AiChatOverlay(
     ) {
         inlineActionView?.let { runCatching { chatList.removeView(it) } }
         inlineActionView = null
-        val anchorWrap = (body?.parent as? View) ?: chatList.getChildAt(index) ?: return
-        val key = index to msg.text
+        // 锚点可能已被整表重建摘掉（parent 为 null）；回退到列表当前项，
+        // 并用正文匹配校正 index，避免插到错误的消息下面。
+        var idx = index
+        var anchorWrap: View? = body?.parent as? View
+        if (anchorWrap == null || chatList.indexOfChild(anchorWrap) < 0) {
+            val byText = messagesSnapshot.indexOfFirst { it.text == msg.text }
+            if (byText >= 0) idx = byText
+            anchorWrap = chatList.getChildAt(idx)
+        }
+        if (anchorWrap == null) return
+        val key = idx to msg.text
         if (actionSheetKey != key) {
             // 换消息时重新绑定，避免复制/删除/收藏打到上一条
             actionSheet?.release()
@@ -1297,7 +2088,7 @@ class AiChatOverlay(
         val sheet = actionSheet ?: MessageActionSheet(
             context,
             msg.text,
-            index,
+            idx,
             msgId = msg.id,
             sid = AiConsoleClient.currentSessionId().orEmpty(),
             role = msg.role,
@@ -1317,6 +2108,29 @@ class AiChatOverlay(
                 AiConsoleClient.editAndSend(newText, editTurnId) { ok, msg ->
                     if (ok) refreshFeatures()
                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            },
+            onRegen = { text0, regenTurnId ->
+                // 助手刷新时上层按 turnId 取同一轮的用户原问题；用户重发则 sheet 已传入自身文本
+                val isUserMsg = msg.role == "user"
+                val question = if (isUserMsg) text0 else
+                    AiConsoleClient.messages.firstOrNull {
+                        it.role == "user" && it.turnId == regenTurnId
+                    }?.text?.trim().orEmpty()
+                if (question.isBlank()) {
+                    Toast.makeText(context, "找不到这一轮的原问题，无法重新生成", Toast.LENGTH_SHORT).show()
+                } else {
+                    CodexUi.confirm(context,
+                        if (isUserMsg) "重新发送这条消息？" else "刷新这条回答？",
+                        "会用同一轮的原问题重新请求一次，旧的这一轮先删除（服务端自动备份），新回答出现在对话末尾。"
+                    ) {
+                        dismissInlinePanel()
+                        forceScrollNext = true
+                        AiConsoleClient.editAndSend(question, regenTurnId) { ok, msg ->
+                            if (ok) refreshFeatures()
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }
             },
             onDismiss = { dismissInlinePanel() }
@@ -1375,7 +2189,7 @@ class AiChatOverlay(
                 bottomMargin = dp(10)
             }
         }
-        val body = TextView(context).apply {
+        val body = BubbleBody(context).apply {
             text = msg.text.ifBlank { if (isUser) "" else "…" }
             textSize = 13f
             setTextColor(if (isUser) Color.WHITE else Color.parseColor("#FFE8E8E8"))
@@ -1385,25 +2199,116 @@ class AiChatOverlay(
                 cornerRadius = dp(10).toFloat()
                 setColor(if (isUser) Color.parseColor("#FF355C7D") else Color.parseColor("#FF333333"))
             }
-            // 点击呼出操作卡；长按则交给系统做文字选择/复制，不再拦截。
-            // 空占位（"…"）既不可点也不可选，避免误触。
-            if (msg.text.isNotBlank()) {
-                // setTextIsSelectable(true) 内部会置 focusable=true，这是长按出现选择手柄
-                // 和系统「复制」菜单的前提。之前为修点击漂移强行关成 false，选字就失效了。
-                // 现在恢复焦点能力，改由 bubbleTouching 延迟收键盘来避免 UP 坐标漂移。
-                setTextIsSelectable(true)
-                isClickable = true
-                setOnTouchListener { _, ev ->
-                    when (ev.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> bubbleTouching = true
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> bubbleTouching = false
-                    }
-                    false // 不消费，长按选字/点击照常交给 TextView
-                }
-                setOnClickListener { v -> showMessageActions(v, msg, index) }
+            // 短按弹卡、长按选字全部由 BubbleBody.dispatchTouchEvent 协调：
+            // 不设 OnClickListener（首次点击会被聚焦消费），不设 OnTouchListener（会覆盖选字）。
+            // bubbleTouching 在 dispatch 阶段置位，阻止 DOWN 抢焦点时输入框收键盘造成落点漂移。
+            //
+            // 关键：监听器必须无条件安装！助手回复是先以 text="" 占位插入、再流式局部更新
+            // 正文的（render 走增量路径不重建气泡）。若按 msg.text.isNotBlank() 决定是否安装，
+            // 新消息的气泡会永远没有点击/长按监听 —— 表现为「新消息点不动也长不动」，
+            // 而一创建就有正文的错误气泡却正常。
+            setTextIsSelectable(true)
+            isClickable = true   // 部分机型长按菜单的前置条件
+            isLongClickable = true
+            onBubbleTouch = { down -> bubbleTouching = down }
+            // 点击当场处理，绝不 post 延迟：回复完成后 400ms 的 refreshHistory 会
+            // removeAllViews + bubbleRefs.clear()，延迟一帧正好可能撞进这个空窗，
+            // getOrNull(index) 拿到 null 就静默 return —— 表现为「最新一条点不动」。
+            // 锚点失效时 insertInlinePanel 会回退到 chatList 当前项。
+            val self = this
+            onSingleTap = {
+                // 用实时快照的正文：气泡创建时可能是空占位，点击时正文已流式填充。
+                // index 越界（消息数变化）时按气泡身份找不到就放弃，避免张冠李戴。
+                val live = messagesSnapshot.getOrNull(index) ?: msg
+                showMessageActions(self, live, index)
             }
         }
         wrap.addView(body)
+
+        // 深度思考过程：独立折叠块，默认收起，点标题展开/收起（对齐 Web 的「已深度思考」details）。
+        // reasoning 是累积文本，整段展示；与「过程」（命令/工具）分开，避免混在一起看不清。
+        if (!isUser && msg.reasoning.isNotBlank()) {
+            val reasonBody = TextView(context).apply {
+                tag = "ai_reason_body"
+                text = msg.reasoning
+                textSize = 11.5f
+                setTextColor(Color.parseColor("#FFB9B0C8"))
+                setPadding(dp(11), dp(7), dp(11), dp(7))
+                visibility = GONE
+                maxWidth = (resources.displayMetrics.widthPixels * 0.82f).roundToInt()
+                setTextIsSelectable(true)
+            }
+            val reasonDet = TextView(context).apply {
+                tag = "ai_reason_det"
+                text = "🧠 已深度思考（${msg.reasoning.length} 字）"
+                textSize = 11f
+                setTextColor(Color.parseColor("#FFB0A8CC"))
+                setPadding(dp(4), dp(3), dp(4), dp(2))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(Color.parseColor("#FF2A2633"))
+                }
+                setOnClickListener {
+                    reasonBody.visibility = if (reasonBody.visibility == VISIBLE) GONE else VISIBLE
+                    text = if (reasonBody.visibility == VISIBLE)
+                        "▾ 已深度思考（${reasonBody.text.length} 字）"
+                    else "🧠 已深度思考（${reasonBody.text.length} 字）"
+                }
+            }
+            wrap.addView(reasonDet)
+            wrap.addView(reasonBody)
+        }
+
+        // 联网搜索来源：对齐 Web 端 .srcDet —— 默认折叠，标题是「搜索来源（N）」，
+        // 展开后每条来源是可点击的超链接标题，点击用系统浏览器打开（只放行 http/https）。
+        if (!isUser && msg.sources.isNotEmpty()) {
+            val srcBody = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = GONE
+                setPadding(dp(8), dp(2), dp(8), dp(4))
+            }
+            msg.sources.forEach { (title, url) ->
+                val safeUrl = runCatching { android.net.Uri.parse(url) }.getOrNull()?.let { uri ->
+                    if (uri.scheme == "http" || uri.scheme == "https") uri else null
+                }
+                srcBody.addView(TextView(context).apply {
+                    text = title
+                    textSize = 11.5f
+                    setTextColor(Color.parseColor("#FF88BBEE"))
+                    setPadding(dp(2), dp(4), dp(2), dp(4))
+                    isClickable = true
+                    // 标题即超链接：点击用系统浏览器打开，跟 Web 端 <a srcLink> 一致。
+                    setOnClickListener {
+                        if (safeUrl == null) {
+                            Toast.makeText(context, "来源链接无效", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        runCatching {
+                            context.startActivity(android.content.Intent(
+                                android.content.Intent.ACTION_VIEW, safeUrl
+                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }.onFailure {
+                            Toast.makeText(context, "无法打开浏览器", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                })
+            }
+            val srcDet = TextView(context).apply {
+                text = "🌐 搜索来源（${msg.sources.size}）"
+                textSize = 11f
+                setTextColor(Color.parseColor("#FF88BBEE"))
+                setPadding(dp(4), dp(3), dp(4), dp(2))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(Color.parseColor("#FF222E3A"))
+                }
+                setOnClickListener {
+                    srcBody.visibility = if (srcBody.visibility == VISIBLE) GONE else VISIBLE
+                }
+            }
+            wrap.addView(srcDet)
+            wrap.addView(srcBody)
+        }
 
         // 助手建议切模式时，把对应模式按钮放进对话气泡下方，一次点击即切换。
         val suggestions = if (!isUser) suggestedModes(msg.text) else emptyList()

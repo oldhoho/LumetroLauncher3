@@ -32,6 +32,8 @@ class CodexHubActivity : AppCompatActivity() {
     )
     private var currentGroup = "工具箱"
     private var current = "抓包"
+    /** 从 AI 窗侧边抽屉直达指定工具页 */
+    companion object { const val EXTRA_PAGE = "page" }
     private var uploadTarget: ((Uri) -> Unit)? = null
     private val pickUpload = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) uploadTarget?.invoke(uri)
@@ -40,6 +42,12 @@ class CodexHubActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AiConsoleClient.init(this)
+        intent.getStringExtra(EXTRA_PAGE)?.takeIf { it.isNotBlank() }?.let { target ->
+            groups.entries.firstOrNull { it.value.contains(target) }?.let { entry ->
+                currentGroup = entry.key
+                current = target
+            }
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -211,11 +219,19 @@ class CodexHubActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
-    private fun switchAndOpen(sid: String, snippet: String) {
+    /**
+     * 全局搜索命中：切到该会话后带搜索词进入对话页，对话页会滚动定位并高亮命中消息。
+     * [terms] 是用户输入的关键词（空格分隔），不是把片段塞进输入框。
+     */
+    private fun switchAndOpen(sid: String, terms: String) {
         AiConsoleClient.switchSession(sid, null) { ok, msg ->
             if (!ok) { toast(msg); return@switchSession }
-            val text = snippet.ifBlank { "" }
-            if (text.isNotBlank()) runInChat(text, false) else openChat()
+            val intent = Intent(this, AiConsoleActivity::class.java)
+            if (terms.isNotBlank()) {
+                intent.putExtra(AiConsoleActivity.EXTRA_JUMP_TERMS, terms)
+            }
+            startActivity(intent)
+            finish()
         }
     }
 
