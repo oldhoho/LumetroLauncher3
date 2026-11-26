@@ -237,7 +237,7 @@ fun modePage(ctx: Context, toast: ToastFn): View = root(ctx) {
                 AiConsoleClient.toggleQuick("search") { ok, msg -> toast(if (ok) msg else msg); refresh() }
             }
         }
-        hint("五个模式的名称、说明与全部配置都在「提示词」页调整；系统词由模式自己携带。")
+        hint("六个模式的名称、说明与全部配置都在「提示词」页调整；秘书模式的长期记忆在「我的秘书」页。")
     }
     section("说明") {
         hint("全能：全部工具 + 高强度推理，能力最强但最费 token")

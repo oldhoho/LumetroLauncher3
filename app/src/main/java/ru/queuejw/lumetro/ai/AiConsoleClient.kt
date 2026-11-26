@@ -94,7 +94,7 @@ object AiConsoleClient {
     private const val SEND_DEDUP_WINDOW_MS = 60_000L
 
     /** 与后端 WORK_MODES 对齐的合法模式集合 */
-    private val WORK_MODES_CLIENT = setOf("full", "lite", "chat", "custom", "device")
+    private val WORK_MODES_CLIENT = setOf("full", "lite", "chat", "custom", "device", "secretary")
 
     /** 与后端 SESSION_RE 一致：s-YYMMDD-HHMM-xxxx */
     private val SESSION_RE = Regex("^s-\\d{6}-\\d{4}-[0-9a-z]{4}$")
@@ -636,7 +636,7 @@ object AiConsoleClient {
 
     // ------------------------------------------------------------ work modes
     // 对齐 CodexWeb v58：内部 key 固定（后端按它区分直连/技能编排/Codex），
-    // 五个模式的名称、说明、推理强度、开关与携带系统词都可编辑，保存在本机 modeDefs。
+    // 六个模式的名称、说明、推理强度、开关与携带系统词都可编辑，保存在本机 modeDefs。
 
     data class ModeCfg(
         val name: String, val desc: String, val effort: String,
@@ -655,6 +655,8 @@ object AiConsoleClient {
         "chat"   to ModeCfg("纯对话", "极简直连 API，零系统提示/零工具，最省 Token", "minimal", false, false, false),
         "device" to ModeCfg("手机控制", "从技能模块编排流程，不能自由操控手机", "minimal", false, false, false),
         "custom" to ModeCfg("自定义", "自定义选项", "medium", false, false, true),
+        // 秘书：跨会话私人秘书，长期记忆 + 稳定人格；走直连 API，由后端注入编译画像。
+        "secretary" to ModeCfg("秘书", "跨会话私人秘书，长期记忆 + 稳定人格", "low", false, false, false),
     )
 
     private var modeDefsCache: Map<String, ModeCfg>? = null
@@ -682,7 +684,7 @@ object AiConsoleClient {
     }
 
     /**
-     * 五个模式的可编辑配置。优先级：服务端 /api/config.modeDefs > 本机缓存/prefs。
+     * 六个模式的可编辑配置。优先级：服务端 /api/config.modeDefs > 本机缓存/prefs。
      * 服务端是跨端唯一权威——Web 端改了模式名/开关，启动器下一轮轮询即可看到。
      * 首次读取会把旧 customCfg / injectMode 迁移进来，避免升级后丢失自定义。
      */
@@ -1652,7 +1654,8 @@ object AiConsoleClient {
     /**
      * 与 CodexWeb 前端 send() 一致的消息载荷（v58）：
      * - 系统词由当前模式直接携带，所有模式（含纯对话）都支持，显式勾选才注入
-     * - chat/device 的 think/search 走后端真实能力（thinking + web_search），只记审计说明
+     * - chat/device/secretary 是直连模式：think/search 走后端真实能力（thinking + web_search），
+     *   秘书画像与日志/笔记提取由后端按 mode=secretary 自动完成，只记审计说明
      * - 其余模式把思考/联网/设备边界写进 prompt
      * - injections 只作审查记录，必须是对象（后端只保留 dict）
      */
@@ -1660,7 +1663,7 @@ object AiConsoleClient {
         val cfg = effectiveCfg()
         val injections = JSONArray()
         var out = text
-        val isPlain = currentMode == "chat" || currentMode == "device"
+        val isPlain = currentMode == "chat" || currentMode == "device" || currentMode == "secretary"
         val thinkText = "请进行充分、逐步的深入分析，展示你的思考过程与依据。"
         val searchText = "请尽可能利用可用工具联网检索最新信息并注明来源，再作答。"
         fun audit(kind: String, detail: String) {

@@ -548,7 +548,7 @@ class AiChatOverlay(
         }
         inputRow.addView(sendBtn)
 
-        // ---- 工作模式条：对齐 Web 端 .modeSeg，五个模式横滑；点当前项不再弹列表 ----
+        // ---- 工作模式条：对齐 Web 端 .modeSeg，六个模式横滑；点当前项不再弹列表 ----
         val modeStripScroll = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
             setBackgroundColor(Color.parseColor("#FF242424"))
@@ -789,6 +789,7 @@ class AiChatOverlay(
         item("技能") { openHub("技能") }
         item("手机控制") { openHub("手机") }
         item("提示词库") { openHub("提示词") }
+        item("我的秘书") { openHub("秘书") }
         section("系统")
         item("会话管理") { openHub("会话") }
         drawerAutoItem = dText(if (autoSpeak) "🔊 自动朗读：开" else "🔊 自动朗读：关",

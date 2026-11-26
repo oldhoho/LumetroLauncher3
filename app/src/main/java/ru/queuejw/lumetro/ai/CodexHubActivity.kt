@@ -27,7 +27,7 @@ class CodexHubActivity : AppCompatActivity() {
 
     private val groups = linkedMapOf(
         "工作区" to listOf("对话", "终端", "文件"),
-        "工具箱" to listOf("抓包", "APK", "技能", "手机", "提示词"),
+        "工具箱" to listOf("抓包", "APK", "技能", "手机", "提示词", "秘书"),
         "系统" to listOf("搜索", "会话", "审查", "运行", "设置", "收藏", "说明", "诊断")
     )
     private var currentGroup = "工具箱"
@@ -176,6 +176,7 @@ class CodexHubActivity : AppCompatActivity() {
             "技能" -> skillsPage(this, ::toast)
             "手机" -> devicePage(this, ::toast)
             "提示词" -> promptsPage(this, ::toast)
+            "秘书" -> secretaryPage(this, ::toast)
             "搜索" -> searchPage(this, ::toast) { sid, snippet -> switchAndOpen(sid, snippet) }
             "会话" -> sessionsPage(this, ::toast) { openChat() }
             "审查" -> contextPage(this, ::toast)

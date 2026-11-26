@@ -986,6 +986,148 @@ fun searchPage(ctx: Context, toast: ToastFn, onOpen: (String, String) -> Unit): 
     }
 }
 
+// ------------------------------------------------------------------ 我的秘书
+
+/**
+ * 跨会话私人秘书：与 Web 端「我的秘书」页共用 /api/secretary 系列接口。
+ * 秘书画像与用户档案由「编译画像」生成，也可手动改；用户笔记在对话中说
+ * 「记住……」时自动追加；工作日志只增不改。四份数据都落在后端同一批文件，
+ * 两端读写即时互通。秘书聊天请用工作模式条里的「秘书」模式。
+ */
+fun secretaryPage(ctx: Context, toast: ToastFn): View {
+    // 视图引用与刷新函数前置声明：编辑框在各 section 内创建（保证位置正确），
+    // 按钮点击时再通过持有者调用 reload/loadLog，避免局部函数前向引用。
+    var pendingBox: TextView? = null
+    var logBox: TextView? = null
+    var personaEdit: EditText? = null
+    var humanEdit: EditText? = null
+    var notesEdit: EditText? = null
+    var thresholdEdit: EditText? = null
+    var reload: () -> Unit = {}
+    var loadLog: () -> Unit = {}
+
+    val view = root(ctx) {
+        title("我的秘书", "跨会话长期记忆与稳定人格 · 与 Web 端共享同一份数据")
+
+        section("状态") {
+            pendingBox = TextView(context).apply {
+                textSize = 11.5f; setTextColor(CodexUi.color("#FFFFD479"))
+            }
+            addView(pendingBox)
+            hint("秘书在完成任务时自动记工作日志、在你明确要求时记笔记；点「编译画像」把素材整理成两份常驻文档。切到「秘书」模式对话才会触发记录。")
+            row {
+                button("编译画像") {
+                    CodexUi.confirm(
+                        context, "编译画像",
+                        "会读取工作日志与用户笔记，生成新的秘书画像和用户档案。这会改变对话前缀，下一轮缓存命中会重新计算（之后恢复）。确定编译吗？",
+                        "确定编译"
+                    ) {
+                        toast("编译中…")
+                        AiConsoleClient.api("POST", "/api/secretary/compile", "{}") { r ->
+                            if (r != null) {
+                                toast("编译完成：画像 ${r.optInt("persona_chars")} 字 · 档案 ${r.optInt("human_chars")} 字")
+                                reload()
+                            } else toast("编译失败：${AiConsoleClient.apiError()}")
+                        }
+                    }
+                }
+                button("刷新") { reload() }
+            }
+        }
+
+        section("秘书画像 · persona") {
+            hint("秘书自己的人设：语气、详略、主动性、称呼、禁忌。由编译生成，也可手动改。")
+            personaEdit = edit("还没有画像，聊几轮后点「编译画像」", "", singleLine = false)
+            row { button("保存画像") {
+                AiConsoleClient.api(
+                    "POST", "/api/secretary/artefact",
+                    JSONObject().put("which", "persona").put("text", personaEdit?.text.toString()).toString()
+                ) { toast(if (it != null) "画像已保存，下一轮生效" else AiConsoleClient.apiError()) }
+            } }
+        }
+        section("用户档案 · human") {
+            hint("关于你的记录：背景、偏好、在意与避开的事。由编译生成，也可手动改。")
+            humanEdit = edit("还没有档案，聊几轮后点「编译画像」", "", singleLine = false)
+            row { button("保存档案") {
+                AiConsoleClient.api(
+                    "POST", "/api/secretary/artefact",
+                    JSONObject().put("which", "human").put("text", humanEdit?.text.toString()).toString()
+                ) { toast(if (it != null) "档案已保存，下一轮生效" else AiConsoleClient.apiError()) }
+            } }
+        }
+        section("用户笔记") {
+            hint("你说「记住……」时秘书自动记下，也可在这里手动编辑；保存时后端会去重。")
+            notesEdit = edit("例如：不吃辣，汇报先说结论", "", singleLine = false)
+            row { button("保存笔记") {
+                AiConsoleClient.api(
+                    "POST", "/api/secretary/notes",
+                    JSONObject().put("text", notesEdit?.text.toString()).toString()
+                ) { r ->
+                    if (r != null) { notesEdit?.setText(r.optString("notes")); toast("用户笔记已保存") }
+                    else toast(AiConsoleClient.apiError())
+                }
+            } }
+        }
+
+        section("工作日志（只增不改）") {
+            hint("秘书完成任务时自动精简记录，编译读取最近 30 天。")
+            logBox = TextView(context).apply {
+                text = "加载中…"; textSize = 11.5f; setTextColor(CodexUi.color("#FFD0D8D0"))
+            }
+            addView(logBox)
+            thresholdEdit = edit("提醒阈值（1-100）", "8", singleLine = true)
+            row {
+                button("保存阈值") {
+                    val n = thresholdEdit?.text.toString().toIntOrNull() ?: 8
+                    AiConsoleClient.api(
+                        "POST", "/api/secretary/threshold", JSONObject().put("value", n).toString()
+                    ) { toast(if (it != null) "提醒阈值已保存" else AiConsoleClient.apiError()) }
+                }
+                button("刷新日志") { loadLog() }
+            }
+        }
+    }
+
+    loadLog = {
+        AiConsoleClient.api("GET", "/api/secretary/worklog") { r ->
+            logBox?.text = if (r != null && r.optString("text").isNotBlank())
+                r.optString("text")
+            else "（还没有工作日志。切到「秘书」模式聊几轮，完成明确任务后会自动记录。）"
+        }
+    }
+    reload = {
+        AiConsoleClient.api("GET", "/api/secretary") { r ->
+            if (r == null) {
+                pendingBox?.text = "加载失败：${AiConsoleClient.apiError()}"
+                return@api
+            }
+            val persona = r.optString("persona")
+            val human = r.optString("human")
+            val notes = r.optString("notes")
+            val pending = r.optInt("pending")
+            val threshold = r.optInt("threshold", 8)
+            val budget = r.optJSONObject("budget")
+            val pBudget = budget?.optInt("persona", 1200) ?: 1200
+            val hBudget = budget?.optInt("human", 1200) ?: 1200
+            personaEdit?.hint = "还没有画像，聊几轮后点「编译画像」（$persona / $pBudget 字）"
+            humanEdit?.hint = "还没有档案，聊几轮后点「编译画像」（$human / $hBudget 字）"
+            notesEdit?.hint = "例如：不吃辣，汇报先说结论（当前 ${notes.length} 字）"
+            personaEdit?.setText(persona)
+            humanEdit?.setText(human)
+            notesEdit?.setText(notes)
+            thresholdEdit?.setText(threshold.toString())
+            var stat = if (pending > 0)
+                "${if (pending >= threshold) "建议编译 · " else ""}距上次编译新增 $pending 条素材"
+            else "无待编译素材"
+            if (!r.optBoolean("configured")) stat += " · 未配置 API，无法编译"
+            pendingBox?.text = stat
+            loadLog()
+        }
+    }
+    reload()
+    return view
+}
+
 // ------------------------------------------------------------------ 说明
 
 fun guidePage(ctx: Context, toast: ToastFn): View = root(ctx) {
@@ -1006,9 +1148,9 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
     var remoteConfigListener: (() -> Unit)? = null
     var flushNamesHook: (() -> Unit)? = null
     val page = root(ctx) {
-    title("提示词与工作模式", "五个模式全部可自定义；系统词由模式自己携带")
+    title("提示词与工作模式", "六个模式全部可自定义；系统词由模式自己携带")
 
-    // 对齐 Web 端 renderMode()：选中哪个模式就编辑哪个，五个模式的名称/说明/
+    // 对齐 Web 端 renderMode()：选中哪个模式就编辑哪个，六个模式的名称/说明/
     // 推理强度/开关/携带系统词都可改，改动立即生效并保存在本机。
     val cfgBox = TextView(ctx).apply { textSize = 11f; setTextColor(CodexUi.color("#FF9EFFB0")) }
     val cfgArea = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -1122,7 +1264,7 @@ fun promptsPage(ctx: Context, toast: ToastFn): View {
         cfgArea.row {
             button("恢复默认模式") {
                 CodexUi.confirm(ctx, "恢复默认模式？",
-                    "五个模式的名称、说明、推理强度、开关与系统词绑定都会还原为出厂默认；提示词预设不受影响。") {
+                    "六个模式的名称、说明、推理强度、开关与系统词绑定都会还原为出厂默认；提示词预设不受影响。") {
                     // 先断开旧输入框引用，避免 rebuild 时把旧值重新写回服务端
                     modeNameEdit = null
                     modeDescEdit = null
