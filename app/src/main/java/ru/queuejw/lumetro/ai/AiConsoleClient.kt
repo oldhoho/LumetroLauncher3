@@ -103,10 +103,19 @@ object AiConsoleClient {
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     /**
      * 自动朗读的唯一入口：本端提问对应的回复完成时回调一次。
-     * Web 端对话、历史刷新、切会话、回到前台都不回调——只有从 AI 窗主动发出的
-     * 提问跑完（finishFromResult）才触发，从根上杜绝同一条回复被读多遍。
+     * 单个槽位而非列表：Activity 重建时旧 overlay 若未及时注销，列表会残留两个 reader，
+     * 一次完成就被读两遍。新注册直接替换旧的，保证任意时刻只有一个朗读者。
      */
-    private val localReplyListeners = CopyOnWriteArrayList<(String) -> Unit>()
+    @Volatile
+    private var localReplyListener: ((String) -> Unit)? = null
+    /**
+     * 一次性朗读令牌：把「本次提问」和「它的回复完成」绑在同一个 job 上。
+     * 后端会把 end 事件写进可重放的事件列表，SSE 重连时会再收到一次 end →
+     * finishFromResult 可能被调用两次；只有令牌尚未消费时才朗读，确保一条只读一次。
+     * Web 端对话不经过 sendTask，永远拿不到令牌，因此绝不会从 AI 窗念出来。
+     */
+    @Volatile
+    private var pendingSpeakJob: String? = null
     private var historyPollJob: Job? = null
     /** 上次已同步的历史签名，仅用于避免无意义重建消息列表，与朗读无关 */
     private var lastSyncedSignature = ""
@@ -1137,11 +1146,13 @@ object AiConsoleClient {
     }
 
     fun addLocalReplyListener(listener: (String) -> Unit) {
-        if (listener !in localReplyListeners) localReplyListeners.add(listener)
+        // 直接替换：旧 Activity 未注销时不会残留第二个朗读者
+        localReplyListener = listener
     }
 
     fun removeLocalReplyListener(listener: (String) -> Unit) {
-        localReplyListeners.remove(listener)
+        // 只清掉仍指向自己的注册，避免误删新 Activity 的监听
+        if (localReplyListener === listener) localReplyListener = null
     }
 
     private fun messagesSignature(list: List<ChatMessage>): String =
@@ -1273,6 +1284,9 @@ object AiConsoleClient {
                 return@launch
             }
             activeJob = job
+            // 只有真正从 AI 窗发出的这条提问才登记朗读令牌。sendTask 是本端唯一发送入口，
+            // Web 端对话走服务端 + 历史轮询，不经过这里，永远不会拿到令牌。
+            pendingSpeakJob = job
             // POST 已被接受，附件归本次 turn；后续重试用气泡里的原文，不再重复带附件
             clearAttachments()
             // 从"提交中"切换到"运行中"：之后由 running 标志继续挡住重复提交
@@ -2053,14 +2067,20 @@ object AiConsoleClient {
         step = ""
         // 本地流已完整播报，标记为已同步，轮询不会再重建消息列表
         syncSignatureFromLocal()
-        // 自动朗读的唯一触发点：本端从 AI 窗发出的提问，此时回复正文已完整写入本地
-        // assistant 气泡（流式 delta 已全部落位）。失败/空回复不念。只发一次，之后
-        // 的 refreshHistory 覆盖、切会话、回前台都不会再触发朗读。
-        if (exit == 0 && !hadError && !stopped) {
+        // 自动朗读的唯一触发点。关键：后端把 end 写进可重放事件列表，SSE 重连会再收到
+        // 一次 end，导致本函数对同一 job 被调用两次。这里用「令牌一次性消费」兜住：
+        // 先取出并清空 pendingSpeakJob，只有非 null 才朗读，第二次调用令牌已空直接跳过。
+        // 令牌只在 sendTask（AI 窗真实发送）里登记，Web 对话拿不到，天然不朗读。
+        val speakNow = synchronized(this) {
+            val j = pendingSpeakJob
+            pendingSpeakJob = null
+            j != null && exit == 0 && !hadError && !stopped
+        }
+        if (speakNow) {
             synchronized(_messages) {
                 _messages.lastOrNull { it.role == "assistant" && !it.failed && it.text.isNotBlank() }?.text
             }?.let { finalText ->
-                localReplyListeners.forEach { runCatching { it(finalText) } }
+                localReplyListener?.let { runCatching { it(finalText) } }
             }
         }
         notifyListeners()
