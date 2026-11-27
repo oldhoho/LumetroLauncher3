@@ -97,15 +97,30 @@ class AiChatOverlay(
     private var autoTts: TextToSpeech? = null
     private var pendingAutoText: String? = null
     /**
-     * 已朗读过的末尾正文，避免同一条被本地 render 与 Web 轮询各播一次。
+     * 已朗读过的末尾正文指纹，避免同一条被本地 render 与 Web 轮询各播一次。
      * 关键：朗读有两个入口——render() 与 remoteAssistantListener，后者运行在历史
      * 轮询协程（非主线程）。两者若直接检查/改写本字段会有竞态：同一段文本被两个
      * 线程同时判为"未读"，于是各播一次，表现为后台一直重复朗读最后一段。
      * 因此两个入口统一 post 到主线程串行执行去重与朗读，杜绝并发窗口。
+     *
+     * 指纹做规范化（压缩空白 + 去首尾）：本地流式正文与服务端落库正文常有细微
+     * 差异（尾部空格、末行换行），精确比较会被击穿，导致同一条读两遍。
      */
-    private var lastSpokenText: String? = null
+    private var lastSpokenKey: String? = null
     /** 基线所属会话：切换会话时把当前末尾回复记为已读，避免翻开旧会话就念历史 */
     private var lastSpokenSid: String? = null
+    /** 朗读指纹：压缩所有空白并去首尾，抹平流式/落库正文的格式差异 */
+    private val speechKeyRegex = Regex("\\s+")
+    private fun speechKey(text: String): String = speechKeyRegex.replace(text, " ").trim()
+
+    /**
+     * 气泡正文：把 Markdown 标记渲染成富文本样式，用户消息保持原文（避免把用户
+     * 输入的 `**` 误当格式）。空占位维持原有行为。
+     */
+    private fun renderBubbleText(text: String, role: String): CharSequence =
+        if (text.isBlank()) (if (role == "user") "" else "…")
+        else if (role == "user") text
+        else MarkdownText.render(text)
 
     /**
      * 手指正按在气泡上。气泡要可长按选字/复制，必须保持 focusable；
@@ -207,7 +222,11 @@ class AiChatOverlay(
     private val remoteAssistantListener: (String) -> Unit = { text ->
         // 注意：此回调运行在历史轮询协程（非主线程），speakAutoIfNew 内部会
         // post 到主线程串行处理，与 render() 的朗读入口共用同一个去重状态。
-        if (autoSpeak) speakAutoIfNew(text)
+        //
+        // 朗读归属：两端都在前台时，Web 端对话由用户直接在 Web 阅读，AI 窗
+        // 不再念出来（否则一条回复在两个界面同时发声，纯属打扰）。AI 窗退到
+        // 后台后恢复——保留"后台继续听 Web 对话"的能力。
+        if (autoSpeak && !AiConsoleClient.uiForeground) speakAutoIfNew(text)
     }
 
     /** 跨端配置变化（工作模式名/预设）后刷新功能面板，不触发消息列表重建 */
@@ -1140,13 +1159,13 @@ class AiChatOverlay(
             .edit().putBoolean("auto_speak", autoSpeak).apply()
         if (!autoSpeak) {
             stopAutoTts()
-            lastSpokenText = null
+            lastSpokenKey = null
         } else {
             // 刚打开时，把当前末尾回复当作「已播过」的基线，避免翻开旧会话就念历史
             lastSpokenSid = AiConsoleClient.currentSessionId()
-            lastSpokenText = AiConsoleClient.messages.lastOrNull {
+            lastSpokenKey = AiConsoleClient.messages.lastOrNull {
                 it.role == "assistant" && !it.failed && it.text.isNotBlank()
-            }?.text
+            }?.let { speechKey(it.text) }
             ensureAutoTts()
         }
         refreshFeatures()
@@ -1240,7 +1259,9 @@ class AiChatOverlay(
                         pendingAutoText = null
                         return@post
                     }
-                    pendingAutoText?.let { ready.speak(it, TextToSpeech.QUEUE_FLUSH, null, "auto") }
+                    pendingAutoText?.let {
+                        ready.speak(MarkdownText.plain(it), TextToSpeech.QUEUE_FLUSH, null, "auto")
+                    }
                     pendingAutoText = null
                 }
             }
@@ -1252,15 +1273,16 @@ class AiChatOverlay(
 
     /**
      * 只朗读尚未播过的新回复：本地流式完成与 Web 轮询都走这里，按正文去重。
-     * 所有调用方（含非主线程的轮询回调）都 post 到主线程串行执行：把"比较 lastSpokenText
+     * 所有调用方（含非主线程的轮询回调）都 post 到主线程串行执行：把"比较已读指纹
      * → 更新 → speak"合成一个不可打断的主线程块，消除后台并发重复朗读的竞态。
      */
     private fun speakAutoIfNew(text: String) {
         if (text.isBlank()) return
         post {
             if (!autoSpeak || text.isBlank()) return@post
-            if (text == lastSpokenText) return@post
-            lastSpokenText = text
+            val key = speechKey(text)
+            if (key == lastSpokenKey) return@post
+            lastSpokenKey = key
             speakAuto(text)
         }
     }
@@ -1274,9 +1296,9 @@ class AiChatOverlay(
         post {
             if (sid == lastSpokenSid) return@post
             lastSpokenSid = sid
-            lastSpokenText = messagesSnapshot.lastOrNull {
+            lastSpokenKey = messagesSnapshot.lastOrNull {
                 it.role == "assistant" && !it.failed && it.text.isNotBlank()
-            }?.text
+            }?.let { speechKey(it.text) }
         }
     }
 
@@ -1291,7 +1313,8 @@ class AiChatOverlay(
             ensureAutoTts()
         } else {
             pendingAutoText = null
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "auto")
+            // 去掉 Markdown 标记再念，否则 TTS 会把"星号星号""井号"读出来
+            engine.speak(MarkdownText.plain(text), TextToSpeech.QUEUE_FLUSH, null, "auto")
         }
     }
 
@@ -2005,7 +2028,7 @@ class AiChatOverlay(
             val m = messagesSnapshot[i]
             val ref = bubbleRefs[i]
             if (m.text != ref.text) {
-                ref.body.text = m.text.ifBlank { if (m.role == "user") "" else "…" }
+                ref.body.text = renderBubbleText(m.text, m.role)
                 ref.text = m.text
             }
             if (m.process != ref.process) {
@@ -2191,7 +2214,7 @@ class AiChatOverlay(
             }
         }
         val body = BubbleBody(context).apply {
-            text = msg.text.ifBlank { if (isUser) "" else "…" }
+            text = renderBubbleText(msg.text, msg.role)
             textSize = 13f
             setTextColor(if (isUser) Color.WHITE else Color.parseColor("#FFE8E8E8"))
             setPadding(dp(11), dp(8), dp(11), dp(8))

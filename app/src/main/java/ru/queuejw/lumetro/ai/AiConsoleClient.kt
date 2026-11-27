@@ -107,6 +107,15 @@ object AiConsoleClient {
     /** 上次已同步的历史签名，避免把本地刚播过的消息当成 Web 新消息重复朗读 */
     private var lastSyncedSignature = ""
 
+    /**
+     * AI 窗是否处于前台可见。供自动朗读判断跨端消息归属：
+     * 两端都在前台时，Web 端对话的回复由用户直接在 Web 看，AI 窗不再朗读；
+     * AI 窗退到后台时仍朗读 Web 新消息（保留后台收听能力）。
+     * 由 AiConsoleActivity 的 onResume/onPause 维护。
+     */
+    @Volatile
+    var uiForeground: Boolean = false
+
     /** Web 同步轮询可由用户在「设置」里关闭或降频，默认开启（保持原有同步体验） */
     @Volatile
     private var historyPollEnabled: Boolean = true

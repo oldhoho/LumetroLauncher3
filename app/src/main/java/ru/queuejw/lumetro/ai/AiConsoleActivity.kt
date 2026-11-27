@@ -54,6 +54,8 @@ class AiConsoleActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // AI 窗回到前台：跨端朗读改为"仅本端对话"，Web 端对话不再从 AI 窗念出来
+        AiConsoleClient.uiForeground = true
         AiConsoleClient.init(this)
         overlay?.show()
         // 启动 Web 端历史轮询；若本地任务在后台断流，这里同时重连 SSE
@@ -87,6 +89,8 @@ class AiConsoleActivity : AppCompatActivity() {
     override fun onPause() {
         // 切后台不收 UI 监听、不停 TTS、不停轮询：
         // 朗读要播完，Web 端新消息也要继续同步，回前台才是完整状态。
+        // 仅把前台标记置否：跨端朗读在后台恢复，让用户能继续听 Web 端对话。
+        AiConsoleClient.uiForeground = false
         super.onPause()
     }
 

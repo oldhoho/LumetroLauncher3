@@ -433,7 +433,7 @@ class MessageActionSheet(
                         override fun onDone(id: String?) = finishSpeak()
                         override fun onError(id: String?) = finishSpeak()
                     })
-                    current.speak(content, TextToSpeech.QUEUE_FLUSH, null, "msg")
+                    current.speak(MarkdownText.plain(content), TextToSpeech.QUEUE_FLUSH, null, "msg")
                 }
             } else {
                 toast("语音引擎初始化失败")
