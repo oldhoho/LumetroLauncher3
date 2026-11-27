@@ -986,13 +986,13 @@ fun searchPage(ctx: Context, toast: ToastFn, onOpen: (String, String) -> Unit): 
     }
 }
 
-// ------------------------------------------------------------------ 我的秘书
+// ------------------------------------------------------------------ 我的助手
 
 /**
- * 跨会话私人秘书：与 Web 端「我的秘书」页共用 /api/secretary 系列接口。
- * 秘书画像与用户档案由「编译画像」生成，也可手动改；用户笔记在对话中说
+ * 跨会话私人助手：与 Web 端「我的助手」页共用 /api/secretary 系列接口。
+ * 助手画像与用户档案由「编译画像」生成，也可手动改；用户笔记在对话中说
  * 「记住……」时自动追加；工作日志只增不改。四份数据都落在后端同一批文件，
- * 两端读写即时互通。秘书聊天请用工作模式条里的「秘书」模式。
+ * 两端读写即时互通。助手聊天请用工作模式条里的「助手」模式。
  */
 fun secretaryPage(ctx: Context, toast: ToastFn): View {
     // 视图引用与刷新函数前置声明：编辑框在各 section 内创建（保证位置正确），
@@ -1007,19 +1007,19 @@ fun secretaryPage(ctx: Context, toast: ToastFn): View {
     var loadLog: () -> Unit = {}
 
     val view = root(ctx) {
-        title("我的秘书", "跨会话长期记忆与稳定人格 · 与 Web 端共享同一份数据")
+        title("我的助手", "跨会话长期记忆与稳定人格 · 与 Web 端共享同一份数据")
 
         section("状态") {
             pendingBox = TextView(context).apply {
                 textSize = 11.5f; setTextColor(CodexUi.color("#FFFFD479"))
             }
             addView(pendingBox)
-            hint("秘书在完成任务时自动记工作日志、在你明确要求时记笔记；点「编译画像」把素材整理成两份常驻文档。切到「秘书」模式对话才会触发记录。")
+            hint("助手在完成任务时自动记工作日志、在你明确要求时记笔记；点「编译画像」把素材整理成两份常驻文档。切到「助手」模式对话才会触发记录。")
             row {
                 button("编译画像") {
                     CodexUi.confirm(
                         context, "编译画像",
-                        "会读取工作日志与用户笔记，生成新的秘书画像和用户档案。这会改变对话前缀，下一轮缓存命中会重新计算（之后恢复）。确定编译吗？",
+                        "会读取工作日志与用户笔记，生成新的助手画像和用户档案。新会话将使用新画像；当前会话保持原有前缀不变，缓存不受影响。确定编译吗？",
                         "确定编译"
                     ) {
                         toast("编译中…")
@@ -1035,8 +1035,8 @@ fun secretaryPage(ctx: Context, toast: ToastFn): View {
             }
         }
 
-        section("秘书画像 · persona") {
-            hint("秘书自己的人设：语气、详略、主动性、称呼、禁忌。由编译生成，也可手动改。")
+        section("助手画像 · persona") {
+            hint("助手自己的人设：语气、详略、主动性、称呼、禁忌。由编译生成，也可手动改。")
             personaEdit = edit("还没有画像，聊几轮后点「编译画像」", "", singleLine = false)
             row { button("保存画像") {
                 AiConsoleClient.api(
@@ -1056,7 +1056,7 @@ fun secretaryPage(ctx: Context, toast: ToastFn): View {
             } }
         }
         section("用户笔记") {
-            hint("你说「记住……」时秘书自动记下，也可在这里手动编辑；保存时后端会去重。")
+            hint("你说「记住……」时助手自动记下，也可在这里手动编辑；保存时后端会去重。")
             notesEdit = edit("例如：不吃辣，汇报先说结论", "", singleLine = false)
             row { button("保存笔记") {
                 AiConsoleClient.api(
@@ -1070,7 +1070,7 @@ fun secretaryPage(ctx: Context, toast: ToastFn): View {
         }
 
         section("工作日志（只增不改）") {
-            hint("秘书完成任务时自动精简记录，编译读取最近 30 天。")
+            hint("助手完成任务时自动精简记录，编译读取最近 30 天。")
             logBox = TextView(context).apply {
                 text = "加载中…"; textSize = 11.5f; setTextColor(CodexUi.color("#FFD0D8D0"))
             }
@@ -1092,7 +1092,7 @@ fun secretaryPage(ctx: Context, toast: ToastFn): View {
         AiConsoleClient.api("GET", "/api/secretary/worklog") { r ->
             logBox?.text = if (r != null && r.optString("text").isNotBlank())
                 r.optString("text")
-            else "（还没有工作日志。切到「秘书」模式聊几轮，完成明确任务后会自动记录。）"
+            else "（还没有工作日志。切到「助手」模式聊几轮，完成明确任务后会自动记录。）"
         }
     }
     reload = {

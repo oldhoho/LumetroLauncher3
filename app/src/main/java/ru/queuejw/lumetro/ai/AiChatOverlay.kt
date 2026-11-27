@@ -48,6 +48,8 @@ class AiChatOverlay(
 
     private val headerTitle: TextView
     private val headerSub: TextView
+    /** 标题栏第三行：当前会话累计 token / 命中率 / 轮数（比单轮 usage 行更小） */
+    private val headerSubTotal: TextView
     /** 当前已显示标题对应的会话 id；变化时异步拉取会话标题回填，避免每个 token 都请求 */
     private var headerSessionId: String? = null
     /** 运行结束时后端 auto_title 会改会话标题，需要强制刷新一次 */
@@ -318,11 +320,19 @@ class AiChatOverlay(
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
-        // 副标题改为实时 token 计数（输入/输出/命中缓存），不再是 http 地址
+        // 副标题改为实时 token 计数（本轮输入/输出/命中缓存），不再是 http 地址
         headerSub = TextView(context).apply {
             text = "token · 等待输入"
             textSize = 11f
             setTextColor(Color.parseColor("#FF9EFFB0"))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        // 会话累计行：单轮 usage 下方补一行，空间紧张就压小字号，颜色略暗以区分层级
+        headerSubTotal = TextView(context).apply {
+            text = "会话累计 · 等待数据"
+            textSize = 9.5f
+            setTextColor(Color.parseColor("#FFA0B8C8"))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -365,6 +375,7 @@ class AiChatOverlay(
         }
         titleCol.addView(headerTitle)
         titleCol.addView(headerSub)
+        titleCol.addView(headerSubTotal)
         header.addView(titleCol)
 
         quickSearchBtn = headerChip("🌐", "#FF9AA5A0") { toggleQuick("search") }
@@ -554,24 +565,31 @@ class AiChatOverlay(
         }
         inputRow.addView(sendBtn)
 
-        // ---- 工作模式条：对齐 Web 端 .modeSeg，六个模式横滑；点当前项不再弹列表 ----
-        val modeStripScroll = HorizontalScrollView(context).apply {
-            isHorizontalScrollBarEnabled = false
+        // ---- 工作模式条：对齐 Web 端 .modeSeg，六个模式等宽平分可视宽度 ----
+        // 不再横滑：每个按钮 weight=1f 平分整行，字号/内边距压小以容纳 4 字模式名 + 选中点
+        modeStrip = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(6), dp(3), dp(6), dp(4))
             setBackgroundColor(Color.parseColor("#FF242424"))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        modeStrip = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(10), dp(3), dp(10), dp(5))
-        }
-        AiConsoleClient.MODE_DEFAULTS.keys.forEach { key ->
+        val modeKeys = AiConsoleClient.MODE_DEFAULTS.keys.toList()
+        modeKeys.forEachIndexed { idx, key ->
             val btn = TextView(context).apply {
-                textSize = 11f
-                setPadding(dp(10), dp(5), dp(10), dp(5))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = dp(6) }
+                textSize = 10f
+                gravity = Gravity.CENTER
+                minimumWidth = 0
+                setPadding(dp(2), dp(5), dp(2), dp(5))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    leftMargin = if (idx == 0) 0 else dp(3)
+                    rightMargin = if (idx == modeKeys.lastIndex) 0 else dp(3)
+                }
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(Color.parseColor("#FF303030"))
+                    setStroke(dp(1), Color.parseColor("#FF454545"))
+                }
                 setOnClickListener {
                     dismissKeyboard()
                     if (AiConsoleClient.currentMode() == key) {
@@ -591,8 +609,7 @@ class AiChatOverlay(
             modeStripButtons.add(btn)
             modeStrip.addView(btn)
         }
-        modeStripScroll.addView(modeStrip)
-        root.addView(modeStripScroll)
+        root.addView(modeStrip)
         root.addView(inputRow)
 
         // ---- 侧边抽屉：包在内容区之上，绝不放进 chatList（气泡索引依赖 child index）----
@@ -795,7 +812,7 @@ class AiChatOverlay(
         item("技能") { openHub("技能") }
         item("手机控制") { openHub("手机") }
         item("提示词库") { openHub("提示词") }
-        item("我的秘书") { openHub("秘书") }
+        item("我的助手") { openHub("助手") }
         section("系统")
         item("会话管理") { openHub("会话") }
         drawerAutoItem = dText(if (autoSpeak) "🔊 自动朗读：开" else "🔊 自动朗读：关",
@@ -1087,14 +1104,11 @@ class AiChatOverlay(
         keys.forEachIndexed { i, key ->
             val b = modeStripButtons.getOrNull(i) ?: return@forEachIndexed
             val on = key == cur
-            b.text = AiConsoleClient.modeLabel(key).take(8) + if (on) " ●" else ""
+            // 六个按钮平分宽度，名称压到 4 字并紧贴选中点，避免被 ellipsize 截断
+            b.text = AiConsoleClient.modeLabel(key).take(4) + if (on) "●" else ""
             b.setTextColor(Color.parseColor(if (on) "#FFFFFFFF" else "#FFA8B0B8"))
             (b.background as? GradientDrawable)?.setColor(
                 Color.parseColor(if (on) "#FF355E52" else "#FF303030"))
-        }
-        modeStripButtons.getOrNull(keys.indexOf(cur))?.let { btn ->
-            (modeStrip.parent as? HorizontalScrollView)?.smoothScrollTo(
-                (btn.left - dp(24)).coerceAtLeast(0), 0)
         }
     }
 
@@ -1635,6 +1649,7 @@ class AiChatOverlay(
         dismissInlinePanel()
         forceRebuildNext = true
         headerSub.text = AiConsoleClient.usageHeaderText()
+        headerSubTotal.text = AiConsoleClient.sessionUsageHeaderText()
         render()
         AiConsoleClient.addListener(renderListener)
         AiConsoleClient.startPollingIfRunning()
@@ -1897,8 +1912,9 @@ class AiChatOverlay(
 
     private fun render() {
         messagesSnapshot = AiConsoleClient.messages
-        // 副标题显示实时 token 计数与命中率，对齐网页端 chip
+        // 副标题显示本轮实时 token 计数与命中率；第三行显示会话累计，对齐网页端 chip
         headerSub.text = AiConsoleClient.usageHeaderText()
+        headerSubTotal.text = AiConsoleClient.sessionUsageHeaderText()
         refreshFeatures()
         val sidRaw = AiConsoleClient.currentSessionId()
         // 运行结束时后端 auto_title 会总结并改写会话标题，强制重拉一次让标题跟上

@@ -233,10 +233,63 @@ object AiConsoleClient {
         return "↯ ${fmt(usageInput + usageOutput)} tok · 命中 ${String.format(Locale.getDefault(), "%.1f", rate)}%"
     }
 
+    /**
+     * 当前会话累计用量：与网页端 usageTotals 同源，权威数据来自 /api/context 的
+     * turn.usage；本端跑完一轮也先即时累加，400ms 后的历史刷新再以服务端值校准。
+     */
+    @Volatile
+    var sessionUsageInput = 0L
+        private set
+    @Volatile
+    var sessionUsageOutput = 0L
+        private set
+    @Volatile
+    var sessionUsageCached = 0L
+        private set
+    @Volatile
+    var sessionUsageTurns = 0
+        private set
+
+    /** 标题栏第二行：会话累计 token / 命中率 / 轮数，小字展示 */
+    fun sessionUsageHeaderText(): String {
+        if (sessionUsageTurns == 0) return "会话累计 · 等待数据"
+        val rate = if (sessionUsageInput > 0) 100.0 * sessionUsageCached / sessionUsageInput else 0.0
+        return "会话 Σ ${fmt(sessionUsageInput + sessionUsageOutput)} tok · 命中 " +
+            "${String.format(Locale.getDefault(), "%.1f", rate)}% · ${sessionUsageTurns} 轮"
+    }
+
+    private fun setSessionUsage(input: Long, cached: Long, output: Long, turns: Int) {
+        sessionUsageInput = input
+        sessionUsageCached = cached
+        sessionUsageOutput = output
+        sessionUsageTurns = turns
+    }
+
+    private fun resetSessionUsage() = setSessionUsage(0, 0, 0, 0)
+
     private fun fmt(n: Long) = if (n >= 1000) "${String.format(Locale.getDefault(), "%.1f", n / 1000f)}k" else "$n"
 
+    /** 本次运行的最终用量是否已被会话累计消费；SSE end 重放时避免重复累加 */
+    @Volatile
+    private var runUsageCommitted = true
+
     /** 重置本次运行用量 */
-    fun resetUsage() { usageInput = 0; usageOutput = 0; usageCached = 0 }
+    fun resetUsage() {
+        usageInput = 0; usageOutput = 0; usageCached = 0
+        runUsageCommitted = false
+    }
+
+    /** 一轮结束时把最终用量并入会话累计，幂等：同一 job 只记一次 */
+    private fun commitRunUsage() {
+        if (runUsageCommitted) return
+        runUsageCommitted = true
+        // 没有任何 usage 事件（发送失败/被取消）就不占一轮，避免误报
+        if (usageInput <= 0 && usageOutput <= 0) return
+        sessionUsageInput += usageInput
+        sessionUsageCached += usageCached
+        sessionUsageOutput += usageOutput
+        sessionUsageTurns += 1
+    }
 
     /** 当前会话消息列表（user/assistant），来自服务端 history 或本地乐观追加 */
     private val _messages = java.util.Collections.synchronizedList(mutableListOf<ChatMessage>())
@@ -668,8 +721,8 @@ object AiConsoleClient {
         "chat"   to ModeCfg("纯对话", "极简直连 API，零系统提示/零工具，最省 Token", "minimal", false, false, false),
         "device" to ModeCfg("手机控制", "从技能模块编排流程，不能自由操控手机", "minimal", false, false, false),
         "custom" to ModeCfg("自定义", "自定义选项", "medium", false, false, true),
-        // 秘书：跨会话私人秘书，长期记忆 + 稳定人格；走直连 API，由后端注入编译画像。
-        "secretary" to ModeCfg("秘书", "跨会话私人秘书，长期记忆 + 稳定人格", "low", false, false, false),
+        // 助手：跨会话私人助手，长期记忆 + 稳定人格；走直连 API，由后端注入编译画像。
+        "secretary" to ModeCfg("助手", "跨会话私人助手，长期记忆 + 稳定人格", "low", false, false, false),
     )
 
     private var modeDefsCache: Map<String, ModeCfg>? = null
@@ -1099,6 +1152,8 @@ object AiConsoleClient {
         // 跟随该会话自身模式（网页端设置的 chat/full/... 原样沿用）
         currentMode = if (mode in WORK_MODES_CLIENT) mode!! else "chat"
         sessionId = sid
+        resetSessionUsage()
+        resetUsage()
         appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             ?.edit()?.putString(KEY_SESSION, sid)?.apply()
         synchronized(_messages) { _messages.clear() }
@@ -1125,6 +1180,8 @@ object AiConsoleClient {
         configuredUrl = normalized
         applyConfig(normalized)
         sessionId = null
+        resetSessionUsage()
+        resetUsage()
         streamJob?.cancel()
         running = false
         submitInFlight = false
@@ -1409,12 +1466,14 @@ object AiConsoleClient {
             val list = parseHistoryMessages(r) ?: emptyList()
             // 与 Web 端同源兜底：/api/history 不带 sources 时，从 /api/context 的
             // turn.events 按 turnId 还原。覆盖切会话/手动刷新场景，避免来源丢失。
-            val contextSources = try { sessionId?.let { loadContextSources(it) } }
-                catch (_: Exception) { emptyMap() } ?: emptyMap()
-            if (contextSources.isNotEmpty()) {
+            val ctx = try { sessionId?.let { loadContextData(it) } }
+                catch (_: Exception) { null } ?: ContextSnapshot()
+            // 会话累计以 /api/context 的 turn.usage 为权威值，切会话/刷新后即时校准
+            setSessionUsage(ctx.input, ctx.cached, ctx.output, ctx.turns)
+            if (ctx.sources.isNotEmpty()) {
                 list.forEach { m ->
                     if (m.sources.isEmpty() && m.turnId.isNotBlank()) {
-                        contextSources[m.turnId]?.let { m.sources = it }
+                        ctx.sources[m.turnId]?.let { m.sources = it }
                     }
                 }
             }
@@ -1528,11 +1587,13 @@ object AiConsoleClient {
                 // 关键：Web 端对话产生的来源不在 /api/history 里（本地也从未收到那条 SSE）。
                 // 与 Web 端 renderSessionHistory 同源，从 /api/context 的 turn.events 还原，
                 // 按 turnId 精确补回，这样 Web 对话完成后的一轮轮询就能带上来源。
-                val contextSources = try { loadContextSources(sid) } catch (_: Exception) { emptyMap() }
-                if (contextSources.isNotEmpty()) {
+                val ctx = try { loadContextData(sid) } catch (_: Exception) { ContextSnapshot() }
+                // Web 端新增轮次后，会话累计随历史一起校准
+                setSessionUsage(ctx.input, ctx.cached, ctx.output, ctx.turns)
+                if (ctx.sources.isNotEmpty()) {
                     serverList.forEach { m ->
                         if (m.sources.isEmpty() && m.turnId.isNotBlank()) {
-                            contextSources[m.turnId]?.let { m.sources = it }
+                            ctx.sources[m.turnId]?.let { m.sources = it }
                         }
                     }
                 }
@@ -1657,6 +1718,9 @@ object AiConsoleClient {
                 return@withLock null
             }
             sessionId = id
+            // 新会话是空账本：清掉上一会话的累计用量，避免首屏显示旧数字
+            resetSessionUsage()
+            resetUsage()
             appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(KEY_SESSION, id)?.apply()
             id
@@ -1667,7 +1731,7 @@ object AiConsoleClient {
      * 与 CodexWeb 前端 send() 一致的消息载荷（v58）：
      * - 系统词由当前模式直接携带，所有模式（含纯对话）都支持，显式勾选才注入
      * - chat/device/secretary 是直连模式：think/search 走后端真实能力（thinking + web_search），
-     *   秘书画像与日志/笔记提取由后端按 mode=secretary 自动完成，只记审计说明
+     *   助手画像与日志/笔记提取由后端按 mode=secretary 自动完成，只记审计说明
      * - 其余模式把思考/联网/设备边界写进 prompt
      * - injections 只作审查记录，必须是对象（后端只保留 dict）
      */
@@ -1978,20 +2042,46 @@ object AiConsoleClient {
     }
 
     /**
-     * 从 /api/context 还原每轮联网搜索来源，按 turnId 索引。
+     * /api/context 一次拉取同时还原：每轮联网搜索来源（按 turnId 索引）与会话累计用量。
      *
-     * 与 Web 端 renderSessionHistory 完全同源：Web 端历史回放不走 /api/history，
-     * 而是读审查记录 turn.events 里的 sources 事件。Web 端发起的对话，启动器
-     * 从未收到过那条 SSE，后端 /api/history 也可能不带 sources（旧版后端），
-     * 只有 /api/context 的 events 一定带 —— 所以这里按 turnId 还原，是跨端
-     * 来源最可靠的权威路径，不依赖后端契约升级。
+     * 与 Web 端 renderSessionHistory / loadSessionHistory 完全同源：Web 端历史回放不走
+     * /api/history，而是读审查记录 turn.events 里的 sources 事件和 turn.usage。Web 端
+     * 发起的对话，启动器从未收到过那条 SSE，只有 /api/context 一定带 —— 所以这里按
+     * turnId 还原来源，并按 turn.usage 累加会话 token，是跨端最可靠的权威路径。
      */
-    private suspend fun loadContextSources(sid: String): Map<String, List<Pair<String, String>>> {
-        val r = request("/api/context?s=" + enc(sid), "GET", null) ?: return emptyMap()
-        val turns = r.optJSONArray("turns") ?: return emptyMap()
+    private data class ContextSnapshot(
+        val sources: Map<String, List<Pair<String, String>>> = emptyMap(),
+        val input: Long = 0L,
+        val cached: Long = 0L,
+        val output: Long = 0L,
+        val turns: Int = 0,
+    )
+
+    private suspend fun loadContextData(sid: String): ContextSnapshot {
+        val r = request("/api/context?s=" + enc(sid), "GET", null) ?: return ContextSnapshot()
+        val turns = r.optJSONArray("turns") ?: return ContextSnapshot()
         val out = mutableMapOf<String, List<Pair<String, String>>>()
+        var inputSum = 0L
+        var cachedSum = 0L
+        var outputSum = 0L
+        var turnCount = 0
         for (i in 0 until turns.length()) {
             val t = turns.optJSONObject(i) ?: continue
+            // 会话累计：turn.usage 由后端 parse_usage 归一化，字段名与 Web 端一致
+            turnCount++
+            t.optJSONObject("usage")?.let { u ->
+                fun pick(vararg keys: String): Long {
+                    for (k in keys) {
+                        val v = u.opt(k)
+                        if (v is Number) return v.toLong()
+                        if (v is String) v.toLongOrNull()?.let { return it }
+                    }
+                    return 0
+                }
+                inputSum += pick("input", "input_tokens", "prompt_tokens")
+                cachedSum += pick("cached", "cached_input_tokens", "cached_tokens", "cache_read_input_tokens")
+                outputSum += pick("output", "output_tokens", "completion_tokens")
+            }
             val tid = t.optString("id")
             if (tid.isBlank()) continue
             val events = t.optJSONArray("events") ?: continue
@@ -2025,7 +2115,7 @@ object AiConsoleClient {
             }
             if (items.isNotEmpty()) out[tid] = items
         }
-        return out
+        return ContextSnapshot(out, inputSum, cachedSum, outputSum, turnCount)
     }
 
     /**
@@ -2049,6 +2139,8 @@ object AiConsoleClient {
 
     private fun finishFromResult(res: JSONObject?) {
         running = false
+        // 本轮最终用量并入会话累计；end 重放时 runUsageCommitted 已置位，不会重复记账
+        commitRunUsage()
         val exit = res?.optInt("exit", 0) ?: 0
         val stopped = res?.optBoolean("stopped") ?: false
         val err = res?.optString("error").orEmpty()
