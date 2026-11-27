@@ -92,26 +92,13 @@ class AiChatOverlay(
     private lateinit var featAttach: TextView
     private lateinit var featureView: TextView
 
-    /** 自动朗读：回复完成后本地 TTS 播报，开关状态存本机 */
+    /** 自动朗读：仅朗读「本端提问完成时」的回复，开关状态存本机 */
     private var autoSpeak = false
     private var autoTts: TextToSpeech? = null
     private var pendingAutoText: String? = null
-    /**
-     * 已朗读过的末尾正文指纹，避免同一条被本地 render 与 Web 轮询各播一次。
-     * 关键：朗读有两个入口——render() 与 remoteAssistantListener，后者运行在历史
-     * 轮询协程（非主线程）。两者若直接检查/改写本字段会有竞态：同一段文本被两个
-     * 线程同时判为"未读"，于是各播一次，表现为后台一直重复朗读最后一段。
-     * 因此两个入口统一 post 到主线程串行执行去重与朗读，杜绝并发窗口。
-     *
-     * 指纹做规范化（压缩空白 + 去首尾）：本地流式正文与服务端落库正文常有细微
-     * 差异（尾部空格、末行换行），精确比较会被击穿，导致同一条读两遍。
-     */
-    private var lastSpokenKey: String? = null
-    /** 基线所属会话：切换会话时把当前末尾回复记为已读，避免翻开旧会话就念历史 */
-    private var lastSpokenSid: String? = null
-    /** 朗读指纹：压缩所有空白并去首尾，抹平流式/落库正文的格式差异 */
-    private val speechKeyRegex = Regex("\\s+")
-    private fun speechKey(text: String): String = speechKeyRegex.replace(text, " ").trim()
+    // 朗读只有唯一入口（AiConsoleClient.finishFromResult → localReplyListener），
+    // 调用方已经保证「一条本端回复只回调一次」，不再需要任何正文指纹去重。
+    // Web 端对话、历史刷新、切会话、回前台都不朗读。
 
     /**
      * 气泡正文：把 Markdown 标记渲染成富文本样式，用户消息保持原文（避免把用户
@@ -218,15 +205,15 @@ class AiChatOverlay(
     /** 从后台返回时强制重建气泡，避免后台历史变化后旧索引/旧引用残留 */
     private var forceRebuildNext = false
 
-    /** Web 端新增回复的朗读回调（Activity 模式下注册，后台也保持） */
-    private val remoteAssistantListener: (String) -> Unit = { text ->
-        // 注意：此回调运行在历史轮询协程（非主线程），speakAutoIfNew 内部会
-        // post 到主线程串行处理，与 render() 的朗读入口共用同一个去重状态。
-        //
-        // 朗读归属：两端都在前台时，Web 端对话由用户直接在 Web 阅读，AI 窗
-        // 不再念出来（否则一条回复在两个界面同时发声，纯属打扰）。AI 窗退到
-        // 后台后恢复——保留"后台继续听 Web 对话"的能力。
-        if (autoSpeak && !AiConsoleClient.uiForeground) speakAutoIfNew(text)
+    /**
+     * 唯一朗读回调：本端提问的回复完成时由 AiConsoleClient.finishFromResult 触发。
+     * 只在「用户确实从 AI 窗发出提问」时读一次；Web 端对话无论前后台都不朗读。
+     * finishFromResult 运行在非主线程流协程，这里 post 回主线程再 speak。
+     */
+    private val localReplyListener: (String) -> Unit = { text ->
+        post {
+            if (autoSpeak && text.isNotBlank()) speakAuto(text)
+        }
     }
 
     /** 跨端配置变化（工作模式名/预设）后刷新功能面板，不触发消息列表重建 */
@@ -306,7 +293,7 @@ class AiChatOverlay(
         autoSpeak = context.getSharedPreferences("ai_console", Context.MODE_PRIVATE)
             .getBoolean("auto_speak", false)
         // Activity 模式由本层负责朗读；旧悬浮窗模式不注册，避免两个 overlay 重复播报
-        if (!manageWindow) AiConsoleClient.addRemoteAssistantListener(remoteAssistantListener)
+        if (!manageWindow) AiConsoleClient.addLocalReplyListener(localReplyListener)
         // 工作模式/预设在 Web 端改动后，服务端配置轮询会触发这里，功能面板即时刷新
         AiConsoleClient.addConfigListener(configChangeListener)
 
@@ -1159,13 +1146,8 @@ class AiChatOverlay(
             .edit().putBoolean("auto_speak", autoSpeak).apply()
         if (!autoSpeak) {
             stopAutoTts()
-            lastSpokenKey = null
         } else {
-            // 刚打开时，把当前末尾回复当作「已播过」的基线，避免翻开旧会话就念历史
-            lastSpokenSid = AiConsoleClient.currentSessionId()
-            lastSpokenKey = AiConsoleClient.messages.lastOrNull {
-                it.role == "assistant" && !it.failed && it.text.isNotBlank()
-            }?.let { speechKey(it.text) }
+            // 朗读只在「本端提问完成」时触发，打开开关本身不会念任何历史消息
             ensureAutoTts()
         }
         refreshFeatures()
@@ -1271,38 +1253,7 @@ class AiChatOverlay(
         }
     }
 
-    /**
-     * 只朗读尚未播过的新回复：本地流式完成与 Web 轮询都走这里，按正文去重。
-     * 所有调用方（含非主线程的轮询回调）都 post 到主线程串行执行：把"比较已读指纹
-     * → 更新 → speak"合成一个不可打断的主线程块，消除后台并发重复朗读的竞态。
-     */
-    private fun speakAutoIfNew(text: String) {
-        if (text.isBlank()) return
-        post {
-            if (!autoSpeak || text.isBlank()) return@post
-            val key = speechKey(text)
-            if (key == lastSpokenKey) return@post
-            lastSpokenKey = key
-            speakAuto(text)
-        }
-    }
-
-    /**
-     * 会话变化时把已有末尾回复设为基线：翻开旧会话不念历史，新会话空历史则基线为空。
-     * 同样 post 到主线程，保证与 speakAutoIfNew 的串行顺序一致——否则轮询线程可能
-     * 在基线重设后又用旧文本朗读一次。
-     */
-    private fun syncSpokenBaseline(sid: String?) {
-        post {
-            if (sid == lastSpokenSid) return@post
-            lastSpokenSid = sid
-            lastSpokenKey = messagesSnapshot.lastOrNull {
-                it.role == "assistant" && !it.failed && it.text.isNotBlank()
-            }?.let { speechKey(it.text) }
-        }
-    }
-
-    /** 回复完成后自动朗读（本地 TTS，不上传音频） */
+    /** 本端回复完成后自动朗读（本地 TTS，不上传音频）；调用方已保证一条只读一次 */
     private fun speakAuto(text: String) {
         if (!autoSpeak || text.isBlank()) return
         val engine = autoTts
@@ -1702,7 +1653,7 @@ class AiChatOverlay(
     /** Activity 真正销毁时释放 TTS、监听器与操作卡 */
     fun release() {
         AiConsoleClient.removeListener(renderListener)
-        AiConsoleClient.removeRemoteAssistantListener(remoteAssistantListener)
+        AiConsoleClient.removeLocalReplyListener(localReplyListener)
         AiConsoleClient.removeConfigListener(configChangeListener)
         imeScrollWatcher?.let { runCatching { viewTreeObserver.removeOnGlobalLayoutListener(it) } }
         imeScrollWatcher = null
@@ -1950,18 +1901,12 @@ class AiChatOverlay(
         headerSub.text = AiConsoleClient.usageHeaderText()
         refreshFeatures()
         val sidRaw = AiConsoleClient.currentSessionId()
-        syncSpokenBaseline(sidRaw)
         // 运行结束时后端 auto_title 会总结并改写会话标题，强制重拉一次让标题跟上
         val runningNow = AiConsoleClient.running
         val justFinished = headerWasRunning && !runningNow
         headerWasRunning = runningNow
-        if (autoSpeak && !runningNow) {
-            // 直接以"当前末尾回复正文"为准：本地刚播完、后台 Web 新增、回到前台补播都覆盖。
-            // justFinished 边缘检测在"切到别的页面再回来"时会漏事件，是开关"看起来没生效"的主因。
-            messagesSnapshot.lastOrNull {
-                it.role == "assistant" && !it.failed && it.text.isNotBlank()
-            }?.let { speakAutoIfNew(it.text) }
-        }
+        // 朗读不在这里触发：render() 会被历史轮询、切会话、回前台、开关切换等频繁调用，
+        // 任何"读末尾正文"的兜底都会造成重复。朗读唯一入口是本端提问完成时的回调。
         // 运行结束后才生成模式按钮；这里主动重建一次让最终文本上的按钮出现。
         if (justFinished && messagesSnapshot.any { suggestedModes(it.text).isNotEmpty() }) {
             forceRebuildNext = true

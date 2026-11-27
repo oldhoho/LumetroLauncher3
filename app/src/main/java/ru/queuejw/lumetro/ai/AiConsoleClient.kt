@@ -101,20 +101,15 @@ object AiConsoleClient {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
-    /** Web 端新增的 assistant 消息（供自动朗读），只在真正新增时回调 */
-    private val remoteAssistantListeners = CopyOnWriteArrayList<(String) -> Unit>()
-    private var historyPollJob: Job? = null
-    /** 上次已同步的历史签名，避免把本地刚播过的消息当成 Web 新消息重复朗读 */
-    private var lastSyncedSignature = ""
-
     /**
-     * AI 窗是否处于前台可见。供自动朗读判断跨端消息归属：
-     * 两端都在前台时，Web 端对话的回复由用户直接在 Web 看，AI 窗不再朗读；
-     * AI 窗退到后台时仍朗读 Web 新消息（保留后台收听能力）。
-     * 由 AiConsoleActivity 的 onResume/onPause 维护。
+     * 自动朗读的唯一入口：本端提问对应的回复完成时回调一次。
+     * Web 端对话、历史刷新、切会话、回到前台都不回调——只有从 AI 窗主动发出的
+     * 提问跑完（finishFromResult）才触发，从根上杜绝同一条回复被读多遍。
      */
-    @Volatile
-    var uiForeground: Boolean = false
+    private val localReplyListeners = CopyOnWriteArrayList<(String) -> Unit>()
+    private var historyPollJob: Job? = null
+    /** 上次已同步的历史签名，仅用于避免无意义重建消息列表，与朗读无关 */
+    private var lastSyncedSignature = ""
 
     /** Web 同步轮询可由用户在「设置」里关闭或降频，默认开启（保持原有同步体验） */
     @Volatile
@@ -1141,12 +1136,12 @@ object AiConsoleClient {
         listeners.remove(listener)
     }
 
-    fun addRemoteAssistantListener(listener: (String) -> Unit) {
-        if (listener !in remoteAssistantListeners) remoteAssistantListeners.add(listener)
+    fun addLocalReplyListener(listener: (String) -> Unit) {
+        if (listener !in localReplyListeners) localReplyListeners.add(listener)
     }
 
-    fun removeRemoteAssistantListener(listener: (String) -> Unit) {
-        remoteAssistantListeners.remove(listener)
+    fun removeLocalReplyListener(listener: (String) -> Unit) {
+        localReplyListeners.remove(listener)
     }
 
     private fun messagesSignature(list: List<ChatMessage>): String =
@@ -1531,20 +1526,14 @@ object AiConsoleClient {
                 val merged = serverList + failedLocals
                 val msgSig = messagesSignature(merged)
                 if (msgSig == lastSyncedSignature) continue
-                val oldList = synchronized(_messages) { _messages.toList() }
-                val oldAssistantTexts = oldList.filter { it.role == "assistant" }.map { it.text }.toSet()
                 lastSyncedSignature = msgSig
                 synchronized(_messages) {
                     _messages.clear()
                     _messages.addAll(merged)
                 }
+                // 历史轮询只负责同步展示，绝不触发朗读。朗读唯一入口是本端提问完成时
+                // 的 finishFromResult；Web 端产生的回复无论正文怎么变都不从 AI 窗念出来。
                 notifyListeners()
-                merged.lastOrNull {
-                    it.role == "assistant" && it.text.isNotBlank() && !it.failed &&
-                        it.text !in oldAssistantTexts
-                }?.let { fresh ->
-                    remoteAssistantListeners.forEach { runCatching { it(fresh.text) } }
-                }
             }
         }
     }
@@ -2062,8 +2051,18 @@ object AiConsoleClient {
             appendErrorBubble(err.take(500))
         }
         step = ""
-        // 本地流已完整播报，标记为已同步，轮询不会把同一条当 Web 新消息再读一遍
+        // 本地流已完整播报，标记为已同步，轮询不会再重建消息列表
         syncSignatureFromLocal()
+        // 自动朗读的唯一触发点：本端从 AI 窗发出的提问，此时回复正文已完整写入本地
+        // assistant 气泡（流式 delta 已全部落位）。失败/空回复不念。只发一次，之后
+        // 的 refreshHistory 覆盖、切会话、回前台都不会再触发朗读。
+        if (exit == 0 && !hadError && !stopped) {
+            synchronized(_messages) {
+                _messages.lastOrNull { it.role == "assistant" && !it.failed && it.text.isNotBlank() }?.text
+            }?.let { finalText ->
+                localReplyListeners.forEach { runCatching { it(finalText) } }
+            }
+        }
         notifyListeners()
         // 后端 end 后再拉一次权威历史覆盖本地乐观消息，保证多轮对齐
         scope.launch {
