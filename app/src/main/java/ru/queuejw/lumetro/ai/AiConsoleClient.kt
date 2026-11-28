@@ -40,6 +40,10 @@ data class ChatMessage(
     val id: String = "",
     /** 该消息所属的审查轮次 id，删除整轮时用 */
     val turnId: String = "",
+    /** P2b recall 建议：仅展示，用户确认后才恢复话题（role="suggestion"） */
+    val suggestionTopic: String = "",
+    val suggestionCardId: String = "",
+    val suggestionTurn: String = "",
 )
 
 /**
@@ -2180,6 +2184,42 @@ object AiConsoleClient {
         scope.launch {
             delay(400L)
             refreshHistory()
+            maybeShowRecallSuggestion()
+        }
+    }
+
+    /** P2b: 拉取本轮 recall 建议，作为一条只展示的消息插入；绝不自动恢复话题。 */
+    private suspend fun maybeShowRecallSuggestion() {
+        val sid = currentSessionId() ?: return
+        val r = try {
+            request("/api/topic/suggestion?s=" + enc(sid), "GET", null)
+        } catch (_: Exception) { null } ?: return
+        val sug = r.optJSONObject("suggestion") ?: return
+        val topic = sug.optString("topic")
+        if (topic.isBlank()) return
+        // 去重：refreshHistory 可能已带入同一条（按 card_id+turn 判定）
+        val cardId = sug.optString("card_id")
+        val turn = sug.optString("turn")
+        synchronized(_messages) {
+            if (_messages.any { it.role == "suggestion" && it.suggestionCardId == cardId && it.suggestionTurn == turn }) return
+            _messages.add(ChatMessage(
+                role = "suggestion", text = "这轮像是在回到旧话题「$topic」，是否恢复？",
+                suggestionTopic = topic, suggestionCardId = cardId, suggestionTurn = turn))
+        }
+        notifyListeners()
+    }
+
+    /** P2b: 用户点了恢复/忽略 —— 调后端并把建议消息移除。 */
+    fun decideRecallSuggestion(yes: Boolean, cardId: String, turn: String) {
+        val sid = currentSessionId() ?: return
+        val path = if (yes) "/api/topic/restore" else "/api/topic/restore/dismiss"
+        val payload = JSONObject().put("session", sid).put("card_id", cardId).put("turn", turn).toString()
+        scope.launch {
+            try { request(path, "POST", payload) } catch (_: Exception) {}
+            synchronized(_messages) {
+                _messages.removeAll { it.role == "suggestion" && it.suggestionCardId == cardId && it.suggestionTurn == turn }
+            }
+            notifyListeners()
         }
     }
 

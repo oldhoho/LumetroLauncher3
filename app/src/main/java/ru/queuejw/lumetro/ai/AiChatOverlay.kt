@@ -2209,6 +2209,8 @@ class AiChatOverlay(
     }
 
     private fun bubble(msg: ChatMessage, index: Int): View {
+        // P2b: recall 建议是可点击的提示卡，绝不自动恢复话题。
+        if (msg.role == "suggestion") return suggestionBubble(msg)
         val isUser = msg.role == "user"
         val wrap = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -2428,6 +2430,54 @@ class AiChatOverlay(
             wrap.addView(det)
             wrap.addView(processView)
         }
+        return wrap
+    }
+
+    // P2b: recall 建议提示卡。展示「是否恢复旧话题」，两个按钮由用户决定；
+    // 客户端绝不自动重锚话题。与 Web 端 .recall-sug 行为一致。
+    private fun suggestionBubble(msg: ChatMessage): View {
+        val wrap = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.START
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(10) }
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.parseColor("#FF232830"))
+                setStroke(dp(1), Color.parseColor("#FF3A4657"))
+            }
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        wrap.addView(TextView(context).apply {
+            text = msg.text
+            textSize = 13f
+            setTextColor(Color.parseColor("#FFE8E8E8"))
+        })
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        fun chip(label: String, yes: Boolean): TextView = TextView(context).apply {
+            text = label
+            textSize = 12f
+            setTextColor(Color.parseColor(if (yes) "#FF9FD8C0" else "#FFB9B0C8"))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(Color.parseColor(if (yes) "#FF2E4A42" else "#FF33343E"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { rightMargin = dp(8) }
+            setOnClickListener {
+                AiConsoleClient.decideRecallSuggestion(
+                    yes, msg.suggestionCardId, msg.suggestionTurn)
+            }
+        }
+        row.addView(chip("恢复", true))
+        row.addView(chip("忽略", false))
+        wrap.addView(row)
         return wrap
     }
 
