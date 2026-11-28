@@ -4,82 +4,51 @@ import android.app.AlertDialog
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import ru.queuejw.lumetro.ai.CodexUi
+import ru.queuejw.lumetro.ai.CodexUi.button
+import ru.queuejw.lumetro.ai.CodexUi.hint
+import ru.queuejw.lumetro.ai.CodexUi.row
+import ru.queuejw.lumetro.ai.CodexUi.section
+import ru.queuejw.lumetro.ai.CodexUi.tinyButton
+import ru.queuejw.lumetro.ai.CodexUi.title
+import ru.queuejw.lumetro.ai.settingsValueRow
 import ru.queuejw.lumetro.gesture.config.IconType
 import ru.queuejw.lumetro.search.config.EngineType
 import ru.queuejw.lumetro.search.config.SearchEngine
 import ru.queuejw.lumetro.search.config.SearchEngineDataManager
 
-/**
- * Manage the search engines shown under the token panel.
- * Field set matches the original add/edit sheet; the full engine picker page
- * belongs to the search-UI batch.
- */
+/** 搜索引擎管理，视觉统一到 AI 窗卡片风格。 */
 class SearchEngineSettingsActivity : AppCompatActivity() {
 
     private lateinit var listContainer: LinearLayout
     private lateinit var defaultEngineValue: TextView
-    private var defaultEngineTag: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-        }
-        root.addView(TextView(this).apply {
-            text = "搜索引擎"
-            textSize = 18f
+        setContentView(CodexUi.root(this) {
+            title("搜索引擎", "搜索链接中的 %s 会替换为选中文字")
+            section("默认引擎") {
+                defaultEngineValue = settingsValueRow("默认搜索引擎", "加载中…") {
+                    showDefaultEngineDialog()
+                }
+            }
+            section("已添加") {
+                listContainer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+                addView(listContainer)
+            }
+            section("操作") {
+                row {
+                    button("添加搜索引擎") { showEditDialog(null) }
+                }
+            }
         })
-        root.addView(TextView(this).apply {
-            text = "搜索链接中 %s 会替换为选中文字"
-            textSize = 12f
-            setTextColor(0xFF777777.toInt())
-            setPadding(0, dp(4), 0, dp(12))
-        })
-
-        val defaultRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(12))
-            setOnClickListener { showDefaultEngineDialog() }
-        }
-        defaultRow.addView(TextView(this).apply {
-            text = "默认搜索引擎"
-            textSize = 15f
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        defaultEngineValue = TextView(this).apply {
-            text = ""
-            textSize = 15f
-        }
-        defaultRow.addView(defaultEngineValue)
-        root.addView(defaultRow)
-
-        listContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(ScrollView(this).apply {
-            addView(listContainer)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
-            )
-        })
-
-        root.addView(Button(this).apply {
-            text = "添加搜索引擎"
-            setOnClickListener { showEditDialog(null) }
-        })
-
-        setContentView(root)
         reload()
     }
 
@@ -87,56 +56,58 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
         lifecycleScope.launch {
             SearchEngineDataManager.ensureDefaultEngines(this@SearchEngineSettingsActivity)
             val engines = SearchEngineDataManager.readSearchEngineList(this@SearchEngineSettingsActivity)
-            defaultEngineTag = SearchEngineDataManager.getDefaultEngineTag(this@SearchEngineSettingsActivity)
-            defaultEngineValue.text = SearchEngineDataManager.getDefaultSearchEngine(
+            val defaultTag = SearchEngineDataManager.getDefaultEngineTag(this@SearchEngineSettingsActivity)
+            defaultEngineValue.text = (SearchEngineDataManager.getDefaultSearchEngine(
                 this@SearchEngineSettingsActivity
-            )?.name ?: "未设置"
+            )?.name ?: "未设置") + "  ›"
             listContainer.removeAllViews()
             if (engines.isEmpty()) {
-                listContainer.addView(TextView(this@SearchEngineSettingsActivity).apply {
-                    text = "暂无搜索引擎"
-                    setPadding(0, dp(12), 0, dp(12))
-                })
+                listContainer.hint("暂无搜索引擎")
+                return@launch
             }
-            engines.forEach { engine ->
-                listContainer.addView(buildRow(engine))
-            }
+            engines.forEach { engine -> listContainer.addView(buildRow(engine, defaultTag)) }
         }
     }
 
-    private fun buildRow(engine: SearchEngine): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8), 0, dp(8))
-            addView(TextView(this@SearchEngineSettingsActivity).apply {
-                text = engine.textIcon ?: engine.name?.take(1).orEmpty()
-                textSize = 16f
-                gravity = Gravity.CENTER
-                setPadding(dp(10), dp(4), dp(10), dp(4))
-                setBackgroundColor(0xFFE8DEF8.toInt())
-            })
-            addView(LinearLayout(this@SearchEngineSettingsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), 0, 0, 0)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                addView(TextView(this@SearchEngineSettingsActivity).apply {
-                    text = engine.name ?: "(未命名)"
-                    textSize = 15f
+    private fun buildRow(engine: SearchEngine, defaultTag: String?): LinearLayout {
+        val isDefault = engine.tag == defaultTag
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(CodexUi.dp(context, 8), CodexUi.dp(context, 8), CodexUi.dp(context, 8), CodexUi.dp(context, 8))
+            background = CodexUi.roundedBg(context, "#FF1E1E1E", 8)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = CodexUi.dp(context, 6) }
+
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TextView(context).apply {
+                    text = engine.textIcon ?: engine.name?.take(1).orEmpty()
+                    textSize = 14f
+                    setTextColor(CodexUi.color("#FFE8E8E8"))
+                    background = CodexUi.roundedBg(context, "#FF3B7D6B", 7)
+                    setPadding(CodexUi.dp(context, 8), CodexUi.dp(context, 4), CodexUi.dp(context, 8), CodexUi.dp(context, 4))
                 })
-                addView(TextView(this@SearchEngineSettingsActivity).apply {
-                    text = engine.searchLink ?: ""
-                    textSize = 12f
-                    setTextColor(0xFF777777.toInt())
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(CodexUi.dp(context, 8), 0, 0, 0)
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    addView(TextView(context).apply {
+                        text = (engine.name ?: "(未命名)") + if (isDefault) " · 默认" else ""
+                        textSize = 12f
+                        setTextColor(CodexUi.color("#FFE8E8E8"))
+                    })
+                    addView(TextView(context).apply {
+                        text = engine.searchLink.orEmpty()
+                        textSize = 10.5f
+                        setTextColor(CodexUi.color("#AA9AA0A8"))
+                        maxLines = 1
+                    })
                 })
             })
-            val isDefault = engine.tag == defaultEngineTag
-            addView(TextView(this@SearchEngineSettingsActivity).apply {
-                text = if (isDefault) "默认" else "设为默认"
-                textSize = 13f
-                setPadding(dp(8), dp(6), dp(8), dp(6))
-                setOnClickListener {
-                    if (isDefault) return@setOnClickListener
+            row {
+                if (!isDefault) tinyButton("设为默认") {
                     lifecycleScope.launch {
                         SearchEngineDataManager.setDefaultEngineTag(
                             this@SearchEngineSettingsActivity, engine.tag
@@ -144,23 +115,18 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
                         reload()
                     }
                 }
-            })
-            addView(Button(this@SearchEngineSettingsActivity).apply {
-                text = "编辑"
-                setOnClickListener { showEditDialog(engine) }
-            })
-            addView(Button(this@SearchEngineSettingsActivity).apply {
-                text = "删除"
-                setOnClickListener {
+                tinyButton("编辑") { showEditDialog(engine) }
+                tinyButton("删除") {
                     lifecycleScope.launch {
                         SearchEngineDataManager.removeSearchEngine(
-                            this@SearchEngineSettingsActivity, engine.tag,
+                            this@SearchEngineSettingsActivity, engine.tag
                         )
                         reload()
                     }
                 }
-            })
+            }
         }
+    }
 
     private fun showDefaultEngineDialog() {
         lifecycleScope.launch {
@@ -168,10 +134,9 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
             if (engines.isEmpty()) return@launch
             val currentTag = SearchEngineDataManager.getDefaultEngineTag(this@SearchEngineSettingsActivity)
             val checked = engines.indexOfFirst { it.tag == currentTag }.coerceAtLeast(0)
-            val labels = engines.map { it.name ?: "(未命名)" }.toTypedArray()
             AlertDialog.Builder(this@SearchEngineSettingsActivity)
                 .setTitle("默认搜索引擎")
-                .setSingleChoiceItems(labels, checked) { dialog, which ->
+                .setSingleChoiceItems(engines.map { it.name ?: "(未命名)" }.toTypedArray(), checked) { dialog, which ->
                     lifecycleScope.launch {
                         SearchEngineDataManager.setDefaultEngineTag(
                             this@SearchEngineSettingsActivity, engines[which].tag
@@ -201,12 +166,11 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
         }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), 0)
+            setPadding(CodexUi.dp(context, 16), CodexUi.dp(context, 10), CodexUi.dp(context, 16), 0)
             addView(nameInput)
             addView(linkInput)
             addView(iconInput)
         }
-
         AlertDialog.Builder(this)
             .setTitle(if (existing == null) "添加搜索引擎" else "编辑搜索引擎")
             .setView(content)
@@ -239,8 +203,6 @@ class SearchEngineSettingsActivity : AppCompatActivity() {
             .setNegativeButton("取消", null)
             .show()
     }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
         const val KEY_ROW_COUNT = "engine_row_count"

@@ -2254,7 +2254,8 @@ class AppListPanel(
             frameVisible = workbenchStyle.keycapFrameEnabled,
             frameImage = keycapFrameImage,
             frameAlpha = workbenchStyle.keycapFrameAlpha * 255 / 100,
-            image = keycapImage
+            image = keycapImage,
+            style = workbenchStyle.keycapStyle
         )
     }
 

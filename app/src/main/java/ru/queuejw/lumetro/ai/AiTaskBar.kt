@@ -6,6 +6,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -33,6 +34,45 @@ class AiTaskBar(
     private val dot = View(context)
     private val preview = TextView(context)
     private val scroller: HorizontalScrollView
+
+    // ---- 长文本滚动播放 ----
+    private val scrollHandler = Handler(Looper.getMainLooper())
+    private var marqueeX = 0
+    private var marqueeMax = 0
+    private var marqueeDir = 1
+    private var marqueePauseTicks = 0
+    private var userHolding = false
+
+    /** 约 28dp/s，50ms 一帧；读长句时不会快到看不清 */
+    private val scrollStep: Int
+        get() = (28f * resources.displayMetrics.density * MARQUEE_TICK_MS / 1000f)
+            .roundToInt().coerceAtLeast(1)
+
+    private val marqueeRunnable = object : Runnable {
+        override fun run() {
+            if (!isAttachedToWindow) return
+            if (userHolding || marqueeMax <= 0) return // 松手后会重新排帧
+            if (marqueePauseTicks > 0) {
+                marqueePauseTicks--
+            } else {
+                marqueeX += marqueeDir * scrollStep
+                when {
+                    marqueeX >= marqueeMax -> {
+                        marqueeX = marqueeMax
+                        marqueeDir = -1
+                        marqueePauseTicks = MARQUEE_EDGE_PAUSE_TICKS
+                    }
+                    marqueeX <= 0 -> {
+                        marqueeX = 0
+                        marqueeDir = 1
+                        marqueePauseTicks = MARQUEE_EDGE_PAUSE_TICKS
+                    }
+                }
+                scroller.scrollTo(marqueeX, 0)
+            }
+            scrollHandler.postDelayed(this, MARQUEE_TICK_MS)
+        }
+    }
 
     // ---- 轮播 ----
     data class RotItem(val text: String, val isQuote: Boolean = false)
@@ -89,6 +129,23 @@ class AiTaskBar(
         }
         scroller = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
+            // 手动按住/滑动时暂停自动播放，松手 0.6s 后从当前位置继续
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        userHolding = true
+                        scrollHandler.removeCallbacks(marqueeRunnable)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        userHolding = false
+                        marqueeX = scrollX.coerceIn(0, marqueeMax)
+                        marqueeDir = if (marqueeMax > 0 && marqueeX >= marqueeMax) -1 else 1
+                        marqueePauseTicks = 10
+                        if (marqueeMax > 0) scrollHandler.postDelayed(marqueeRunnable, 600)
+                    }
+                }
+                false
+            }
             addView(preview, LayoutParams(
                 LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT
             ))
@@ -112,6 +169,7 @@ class AiTaskBar(
     override fun onDetachedFromWindow() {
         handler.removeCallbacks(rotateRunnable)
         handler.removeCallbacks(quoteRunnable)
+        scrollHandler.removeCallbacks(marqueeRunnable)
         AiConsoleClient.removeListener(renderListener)
         super.onDetachedFromWindow()
     }
@@ -147,6 +205,33 @@ class AiTaskBar(
         return items
     }
 
+    /** 长句滚动一趟所需时间，用于延长该条轮播的停留，避免没读完就切走 */
+    private fun marqueeDwellMs(text: String): Long {
+        val avail = scroller.width.toFloat()
+        if (avail <= 0f) return 0L
+        val overflow = (preview.paint.measureText(text) - avail).coerceAtLeast(0f)
+        if (overflow <= 0f) return 0L
+        val pxPerSec = 28f * resources.displayMetrics.density
+        // 往返一趟 + 两端各停 1s
+        return ((overflow / pxPerSec) * 2f * 1000f + 2000f)
+            .toLong().coerceAtMost(MAX_MARQUEE_DWELL_MS)
+    }
+
+    /** 文字变化时重新量宽并从开头播放；量宽要等布局完成 */
+    private fun syncMarquee() {
+        val text = preview.text.toString()
+        scroller.post {
+            if (!isAttachedToWindow || preview.text.toString() != text) return@post
+            marqueeMax = (preview.width - scroller.width).coerceAtLeast(0)
+            marqueeX = 0
+            marqueeDir = 1
+            marqueePauseTicks = MARQUEE_EDGE_PAUSE_TICKS
+            scrollHandler.removeCallbacks(marqueeRunnable)
+            scroller.scrollTo(0, 0)
+            if (marqueeMax > 0) scrollHandler.postDelayed(marqueeRunnable, 400L)
+        }
+    }
+
     /** 渲染当前项并返回它应停留的时长；状态变化触发时保持当前项不跳 */
     private fun renderStatus(): Long {
         val items = rotatingItems()
@@ -155,9 +240,9 @@ class AiTaskBar(
             val idx = rotateIndex % items.size
             val item = items[idx]
             preview.text = item.text
-            delay = durationFor(item)
+            delay = kotlin.math.max(durationFor(item), marqueeDwellMs(item.text))
         }
-        scroller.post { scroller.fullScroll(Gravity.END) }
+        syncMarquee()
 
         val error = AiConsoleClient.lastError
         dot.background = GradientDrawable().apply {
@@ -213,7 +298,10 @@ class AiTaskBar(
 
     /** 兼容旧调用：设置预览文字 */
     fun setText(text: String) {
-        if (text.isNotEmpty()) preview.text = text
+        if (text.isNotEmpty()) {
+            preview.text = text
+            syncMarquee()
+        }
     }
 
     /** 兼容旧调用：本条已不是输入框，无 IME 焦点可释放 */
@@ -227,6 +315,9 @@ class AiTaskBar(
         private const val BASE_ROTATE_MS = 4000L   // 短项基础停留
         private const val MAX_ROTATE_MS = 9000L    // 普通项最长停留
         private const val MAX_QUOTE_MS = 27000L    // 一言 3 倍，封顶
+        private const val MAX_MARQUEE_DWELL_MS = 24000L
+        private const val MARQUEE_TICK_MS = 50L
+        private const val MARQUEE_EDGE_PAUSE_TICKS = 20 // 两端各停 1s
         private val SYSTEM_TIPS = listOf(
             "提示：点开会话可直接输入并发送",
             "提示：点击气泡可复制/收藏/朗读",

@@ -414,14 +414,22 @@ class MessageActionSheet(
 
     private fun startSpeak(content: String) {
         if (content.isBlank()) { toast("空消息"); return }
+        // 先申请音频焦点：拿不到说明此刻有更重要的声音（音乐/通话/语音输入），不朗读。
+        // 回调里 stopSpeak 停读并复原 UI；两个朗读入口共用管理器，自动朗读会被这里挤停。
+        if (!TtsAudioFocus.request(ctx, this) { stopSpeakFromFocusLoss() }) {
+            toast("当前有其他声音在播放，暂不朗读")
+            return
+        }
         isSpeaking = true
         refreshCells()
         toast("开始朗读，再点一次可停止")
         val appCtx = ctx.applicationContext
         tts = TextToSpeech(appCtx) { status ->
-            // 用户可能在引擎初始化期间点了停止
+            // 用户可能在引擎初始化期间点了停止，或这期间焦点已被抢占
             val current = tts
-            if (!isSpeaking || current == null) { shutdownTts(); return@TextToSpeech }
+            if (!isSpeaking || current == null ||
+                !TtsAudioFocus.isHeldBy(this@MessageActionSheet)
+            ) { shutdownTts(); return@TextToSpeech }
             if (status == TextToSpeech.SUCCESS) {
                 val r = current.setLanguage(Locale.CHINA)
                 if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
@@ -442,6 +450,9 @@ class MessageActionSheet(
         }
     }
 
+    /** 焦点被媒体/来电/通话/语音输入抢占：停读并复原「朗读」图标（不弹提示，避免打断用户） */
+    private fun stopSpeakFromFocusLoss() = finishSpeak()
+
     /** TTS 回调可能不在 UI 线程，回到主线程更新图标 */
     private fun finishSpeak() {
         val cell = speakCell
@@ -456,6 +467,7 @@ class MessageActionSheet(
     }
 
     private fun shutdownTts() {
+        TtsAudioFocus.abandon(this)
         val t = tts
         tts = null
         runCatching { t?.stop(); t?.shutdown() }

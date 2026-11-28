@@ -111,9 +111,6 @@ private fun perfLog(message: String) {
 
     private val keycapStates = HashMap<Int, android.graphics.drawable.Drawable.ConstantState?>()
 
-    private var touchDownX = 0f
-    private var touchDownY = 0f
-
     @Volatile
 private var cachedApps: MutableList<App> = mutableListOf()
 
@@ -1356,24 +1353,14 @@ fun showAppsList() {
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
                 setOnTouchListener { _, event ->
-                    when (event.action) {
-                        MotionEvent.ACTION_DOWN -> {
-                            touchDownX = event.x
-                            touchDownY = event.y
-                            false
-                        }
-                        MotionEvent.ACTION_UP -> {
-                            val dx = kotlin.math.abs(event.x - touchDownX)
-                            val dy = kotlin.math.abs(event.y - touchDownY)
-                            if (dx < 20f && dy < 20f) {
-                                hideAppsList()
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        else -> false
+                    // 这个监听器只会收到「面板以外」的事件：面板内的 DOWN 会被
+                    // contentContainer 的子 View 消费。原先只在 ACTION_UP 且位移
+                    // 很小时才收起，滑动空白区域既不收起也无法透传给桌面，手感很糟。
+                    // 现在外部任意按下（点击或滑动起手）都立刻收起面板。
+                    if (event.action == MotionEvent.ACTION_DOWN) {
+                        hideAppsList()
                     }
+                    false
                 }
 
                 isFocusable = true
@@ -1502,24 +1489,14 @@ if (snapFB.isEmpty()) {
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
                 setOnTouchListener { _, event ->
-                    when (event.action) {
-                        MotionEvent.ACTION_DOWN -> {
-                            touchDownX = event.x
-                            touchDownY = event.y
-                            false
-                        }
-                        MotionEvent.ACTION_UP -> {
-                            val dx = kotlin.math.abs(event.x - touchDownX)
-                            val dy = kotlin.math.abs(event.y - touchDownY)
-                            if (dx < 20f && dy < 20f) {
-                                hideAppsList()
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        else -> false
+                    // 这个监听器只会收到「面板以外」的事件：面板内的 DOWN 会被
+                    // contentContainer 的子 View 消费。原先只在 ACTION_UP 且位移
+                    // 很小时才收起，滑动空白区域既不收起也无法透传给桌面，手感很糟。
+                    // 现在外部任意按下（点击或滑动起手）都立刻收起面板。
+                    if (event.action == MotionEvent.ACTION_DOWN) {
+                        hideAppsList()
                     }
+                    false
                 }
 
                 isFocusable = true
@@ -2273,18 +2250,19 @@ private fun keycapBg(tint: Int? = null): android.graphics.drawable.Drawable {
 private fun buildKeycapBg(tint: Int?): android.graphics.drawable.Drawable =
     ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(
         context = context,
-        cornerDp = 12f,
-        depthDp = 3f,
+        cornerDp = style.workbenchKeycapCornerDp.toFloat(),
+        depthDp = style.workbenchKeycapDepthDp.toFloat(),
         tint = tint,
-        baseColor = WorkbenchStyle.colorOf(style.keyPressedTopColor),
-        topColor = WorkbenchStyle.colorOf(style.keyTopColor),
-        bottomColor = WorkbenchStyle.colorOf(style.keyBottomColor),
-        pressedTopColor = WorkbenchStyle.colorOf(style.keyPressedTopColor),
-        pressedBottomColor = WorkbenchStyle.colorOf(style.keyPressedBottomColor),
-        frameVisible = style.keycapFrameEnabled,
+        baseColor = WorkbenchStyle.colorOf(style.workbenchKeyPressedTopColor),
+        topColor = WorkbenchStyle.colorOf(style.workbenchKeyTopColor),
+        bottomColor = WorkbenchStyle.colorOf(style.workbenchKeyBottomColor),
+        pressedTopColor = WorkbenchStyle.colorOf(style.workbenchKeyPressedTopColor),
+        pressedBottomColor = WorkbenchStyle.colorOf(style.workbenchKeyPressedBottomColor),
+        frameVisible = style.workbenchKeycapFrameEnabled,
         frameImage = StyleImageStore.load(context, StyleImageStore.KEYCAP_FRAME),
-        frameAlpha = style.keycapFrameAlpha * 255 / 100,
-        image = StyleImageStore.load(context, StyleImageStore.KEYCAP)
+        frameAlpha = style.workbenchKeycapFrameAlpha * 255 / 100,
+        image = StyleImageStore.load(context, StyleImageStore.KEYCAP),
+        style = style.workbenchKeycapStyle
     )
 
 private fun createAppItem(packageName: String, appName: String, isForeground: Boolean, slotWidth: Int): View {
@@ -2307,7 +2285,7 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
         when {
             currentMode == Mode.ADD && !blacklist.contains(packageName) -> background = keycapBg(0x22FFFFFF)
             currentMode == Mode.REMOVE && blacklist.contains(packageName) -> background = keycapBg(0x33FF4444)
-            isForeground -> background = keycapBg(0x33FF8800)
+            isForeground -> background = keycapBg()
             else -> background = keycapBg()
         }
 
@@ -2455,28 +2433,48 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
             layoutParams = LinearLayout.LayoutParams(iconSize, iconSize)
         }
 
-        val iconView = ImageView(context).apply {
-            val bitmap = iconLoader?.getIconForPackage(context, packageName)
-            if (bitmap != null) {
-                setImageBitmap(bitmap)
-            } else {
-                setImageDrawable(fallbackIcon(packageName))
+        val rawIcon: Drawable? =
+            iconLoader?.getIconForPackage(context, packageName)
+                ?.let { android.graphics.drawable.BitmapDrawable(context.resources, it) }
+                ?: fallbackIcon(packageName)
+
+        // 图标包已覆盖的图标：自身风格与形状已统一，直接显示原图，不做裁切窗口。
+        // 系统默认图标：仍套统一裁切窗口，把大小/形状各异的图标收敛成同一造型。
+        val coveredByPack = iconLoader?.isCoveredByIconPack(context, packageName) == true
+        val iconView = if (coveredByPack) {
+            ImageView(context).apply {
+                setImageDrawable(rawIcon)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = FrameLayout.LayoutParams(iconSize, iconSize)
             }
-            layoutParams = FrameLayout.LayoutParams(iconSize, iconSize)
+        } else {
+            View(context).apply {
+                background = ru.queuejw.lumetro.components.ui.keycap.IconWindowDrawable(
+                    rawIcon, WorkbenchStyle.colorOf(style.workbenchLineColor), isForeground,
+                    style.workbenchIconCropStyle
+                )
+                layoutParams = FrameLayout.LayoutParams(iconSize, iconSize)
+            }
         }
         iconContainer.addView(iconView)
 
-        // ========== 冻结角标（右上角❄） ==========
+        // ========== 冻结角标（右上角❄，圆角小胶囊） ==========
         if (isFrozen) {
-            val badgeSize = 10.dpToPx()
+            val badgeSize = 11.dpToPx()
             val badge = TextView(context).apply {
                 text = "❄"
                 textSize = 7f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
-                setBackgroundColor(WorkbenchStyle.colorOf(style.badgeColor))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    cornerRadius = badgeSize / 2f
+                    setColor(WorkbenchStyle.colorOf(style.badgeColor))
+                }
                 layoutParams = FrameLayout.LayoutParams(badgeSize, badgeSize).apply {
                     gravity = Gravity.TOP or Gravity.END
+                    rightMargin = (-2).dpToPx()
+                    topMargin = (-2).dpToPx()
                 }
             }
             iconContainer.addView(badge)
@@ -2561,8 +2559,13 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
 
         when (currentMode) {
             Mode.NORMAL -> {
-                val iconView = createWindowsIcon()
-                item.addView(iconView)
+                // 搜索按钮恢复原始直显样式：不套裁切窗口，按图标大小等比显示
+                val size = style.workbenchIconSizeDp.dpToPx()
+                item.addView(ImageView(context).apply {
+                    setImageDrawable(searchIconDrawable())
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    layoutParams = LinearLayout.LayoutParams(size, size)
+                })
 
                 val nameView = TextView(context).apply {
                     text = "搜索"
@@ -2637,22 +2640,14 @@ private fun createAppItem(packageName: String, appName: String, isForeground: Bo
         return item
     }
 
-    private fun createWindowsIcon(): ImageView {
-        return ImageView(context).apply {
-            try {
-                val resId = context.resources.getIdentifier("windows11_logo", "mipmap", context.packageName)
-                if (resId != 0) {
-                    setImageResource(resId)
-                } else {
-                    setImageResource(android.R.drawable.ic_menu_recent_history)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "createWindowsIcon failed", e)
-                setImageResource(android.R.drawable.ic_menu_recent_history)
-            }
-            val iconSize = 32.dpToPx()
-            layoutParams = LinearLayout.LayoutParams(iconSize, iconSize)
-        }
+    /** 取搜索槽位图标的 Drawable，原始直显（不套裁切窗口） */
+    private fun searchIconDrawable(): Drawable? = try {
+        val resId = context.resources.getIdentifier("windows11_logo", "mipmap", context.packageName)
+        if (resId != 0) context.resources.getDrawable(resId, context.theme)
+        else context.getDrawable(android.R.drawable.ic_menu_recent_history)
+    } catch (e: Exception) {
+        Log.e(TAG, "searchIconDrawable failed", e)
+        context.getDrawable(android.R.drawable.ic_menu_recent_history)
     }
 
     private val keyBindings = KeyboardKeyBindings.getInstance(context)

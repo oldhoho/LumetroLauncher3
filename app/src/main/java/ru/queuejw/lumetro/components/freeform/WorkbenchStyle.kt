@@ -27,6 +27,59 @@ class WorkbenchStyle(context: Context) {
         set(value) = prefs.edit().putInt("keyboard_panel_alpha", value.coerceIn(0, 100)).apply()
 
     // ========== 键帽 ==========
+    /** 键帽风格：见 KeycapDrawable.STYLE_NAMES / STYLE_COUNT */
+    var keycapStyle: Int
+        get() = prefs.getInt("keycap_style", 1)
+        set(value) = prefs.edit().putInt(
+            "keycap_style",
+            value.coerceIn(0, ru.queuejw.lumetro.components.ui.keycap.KeycapDrawable.STYLE_COUNT - 1)
+        ).apply()
+
+    // ========== 工作台键帽（与九键面板独立） ==========
+    var workbenchKeycapStyle: Int
+        get() = prefs.getInt("wb_keycap_style", 1)
+        set(value) = prefs.edit().putInt(
+            "wb_keycap_style",
+            value.coerceIn(0, ru.queuejw.lumetro.components.ui.keycap.KeycapDrawable.STYLE_COUNT - 1)
+        ).apply()
+
+    var workbenchKeycapCornerDp: Int
+        get() = prefs.getInt("wb_keycap_corner", 12)
+        set(value) = prefs.edit().putInt("wb_keycap_corner", value.coerceIn(0, 20)).apply()
+
+    var workbenchKeycapDepthDp: Int
+        get() = prefs.getInt("wb_keycap_depth", 3)
+        set(value) = prefs.edit().putInt("wb_keycap_depth", value.coerceIn(0, 8)).apply()
+
+    var workbenchKeyTopColor: String
+        get() = prefs.getString("wb_key_top_color", "#2E2E2E")!!
+        set(value) = prefs.edit().putString("wb_key_top_color", value).apply()
+
+    var workbenchKeyBottomColor: String
+        get() = prefs.getString("wb_key_bottom_color", "#1E1E1E")!!
+        set(value) = prefs.edit().putString("wb_key_bottom_color", value).apply()
+
+    var workbenchKeyPressedTopColor: String
+        get() = prefs.getString("wb_key_pressed_top", "#1A1A1A")!!
+        set(value) = prefs.edit().putString("wb_key_pressed_top", value).apply()
+
+    var workbenchKeyPressedBottomColor: String
+        get() = prefs.getString("wb_key_pressed_bottom", "#141414")!!
+        set(value) = prefs.edit().putString("wb_key_pressed_bottom", value).apply()
+
+    var workbenchKeycapFrameEnabled: Boolean
+        get() = prefs.getBoolean("wb_keycap_frame", true)
+        set(value) = prefs.edit().putBoolean("wb_keycap_frame", value).apply()
+
+    var workbenchKeycapFrameAlpha: Int
+        get() = prefs.getInt("wb_keycap_frame_alpha", 100)
+        set(value) = prefs.edit().putInt("wb_keycap_frame_alpha", value.coerceIn(0, 100)).apply()
+
+    /** 图标裁切窗口风格：见 IconWindowDrawable.STYLE_NAMES（0 圆角方窗） */
+    var workbenchIconCropStyle: Int
+        get() = prefs.getInt("wb_icon_crop_style", 0)
+        set(value) = prefs.edit().putInt("wb_icon_crop_style", value.coerceIn(0, 11)).apply()
+
     var keycapCornerDp: Int
         get() = prefs.getInt("keycap_corner", 8)
         set(value) = prefs.edit().putInt("keycap_corner", value.coerceIn(0, 20)).apply()

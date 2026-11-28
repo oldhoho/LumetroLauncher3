@@ -2,12 +2,19 @@ package ru.queuejw.lumetro.components.freeform
 
 import android.content.Intent
 import android.os.Bundle
-import android.os.Environment
-import android.util.Log
-import android.widget.*
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import ru.queuejw.lumetro.R
 import ru.queuejw.lumetro.ai.AiConsoleActivity
+import ru.queuejw.lumetro.ai.CodexUi
+import ru.queuejw.lumetro.ai.CodexUi.actionCard
+import ru.queuejw.lumetro.ai.CodexUi.button
+import ru.queuejw.lumetro.ai.CodexUi.hint
+import ru.queuejw.lumetro.ai.CodexUi.row
+import ru.queuejw.lumetro.ai.CodexUi.section
+import ru.queuejw.lumetro.ai.CodexUi.title
+import ru.queuejw.lumetro.ai.settingsActionCard
+import ru.queuejw.lumetro.ai.settingsSlider
+import ru.queuejw.lumetro.ai.settingsSwitch
 import ru.queuejw.lumetro.components.core.sidebar.SidebarAccessibilityService
 import ru.queuejw.lumetro.components.freeform.gesture.LeftGestureStripManager
 import ru.queuejw.lumetro.gesture.TriggerSide
@@ -15,484 +22,130 @@ import ru.queuejw.lumetro.pin.PinPoolFloating
 import ru.queuejw.lumetro.settings.AppearanceSettingsActivity
 import ru.queuejw.lumetro.settings.InspireSettingsActivity
 import ru.queuejw.lumetro.settings.SearchEngineSettingsActivity
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
+/** 启动器总设置。视觉统一到 AI 窗的 CodexUi 卡片风格。 */
 class WorkbenchSettingsActivity : AppCompatActivity() {
 
     private lateinit var settings: WorkbenchSettings
     private lateinit var gestureManager: LeftGestureStripManager
     private var workbenchManager: WorkbenchManager? = null
 
-    // ========== 工作台设置控件 ==========
-    private lateinit var switchEnabled: Switch
-    private lateinit var seekbarHeight: SeekBar
-    private lateinit var tvHeightValue: TextView
-
-    // ========== 手势条设置控件 ==========
-    private lateinit var seekbarGestureWidth: SeekBar
-    private lateinit var seekbarGestureHeight: SeekBar
-    private lateinit var seekbarGestureOffset: SeekBar
-    private lateinit var seekbarGestureAlpha: SeekBar
-    private lateinit var tvGestureWidthValue: TextView
-    private lateinit var tvGestureHeightValue: TextView
-    private lateinit var tvGestureOffsetValue: TextView
-    private lateinit var tvGestureAlphaValue: TextView
-
-    // ========== 应用列表设置控件 ==========
-    private lateinit var seekbarAppListWidth: SeekBar
-    private lateinit var seekbarAppListHeight: SeekBar
-    private lateinit var seekbarAppListOffset: SeekBar
-    private lateinit var seekbarAppListCorner: SeekBar
-    private lateinit var seekbarAppListDim: SeekBar
-    private lateinit var tvAppListWidthValue: TextView
-    private lateinit var tvAppListHeightValue: TextView
-    private lateinit var tvAppListOffsetValue: TextView
-    private lateinit var tvAppListCornerValue: TextView
-    private lateinit var tvAppListDimValue: TextView
-
-    // ========== 列表图标间距 ==========
-    private lateinit var seekbarIconSpacing: SeekBar
-    private lateinit var tvIconSpacingValue: TextView
+    private var gestureWidth = 4
+    private var gestureHeight = 180
+    private var gestureOffset = 0
+    private var gestureAlpha = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_workbench_settings)
-
-        Log.d("Settings", "=== onCreate ===")
-
         settings = WorkbenchSettings(this)
 
         val service = SidebarAccessibilityService.getInstance()
-        Log.d("Settings", "service = $service")
         if (service == null) {
-            Toast.makeText(this, "AccessibilityService 未启动，无法调整手势条", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "无障碍服务未启动，无法调整手势条", Toast.LENGTH_LONG).show()
             finish()
             return
         }
-
         gestureManager = LeftGestureStripManager.getInstance(this, service)
-
         workbenchManager = WorkbenchManager.getInstance()
-        Log.d("Settings", "workbenchManager = $workbenchManager")
-        if (workbenchManager == null) {
-            Toast.makeText(this, "WorkbenchManager 未初始化，部分功能不可用", Toast.LENGTH_LONG).show()
-        }
 
-        initViews()
-        setupListeners()
-        loadSettings()
-        
-        // ========== 应用持久化的手势条设置 ==========
-        applySavedGestureSettings()
-    }
+        gestureWidth = settings.gestureStripWidth
+        gestureHeight = settings.gestureStripHeight
+        gestureOffset = settings.gestureStripOffset
+        gestureAlpha = (settings.gestureStripAlpha * 100).toInt()
 
-    private fun initViews() {
-        // ========== 工作台设置 ==========
-        switchEnabled = findViewById(R.id.switch_workbench_enabled)
-        seekbarHeight = findViewById(R.id.seekbar_workbench_height)
-        tvHeightValue = findViewById(R.id.tv_height_value)
+        setContentView(CodexUi.root(this) {
+            title("启动器设置", "工作台 · 手势 · 九键面板，全部与悬浮层实时同步")
 
-        // ========== 手势条设置 ==========
-        seekbarGestureWidth = findViewById(R.id.seekbar_gesture_width)
-        seekbarGestureHeight = findViewById(R.id.seekbar_gesture_height)
-        seekbarGestureOffset = findViewById(R.id.seekbar_gesture_offset)
-        seekbarGestureAlpha = findViewById(R.id.seekbar_gesture_alpha)
-        tvGestureWidthValue = findViewById(R.id.tv_gesture_width_value)
-        tvGestureHeightValue = findViewById(R.id.tv_gesture_height_value)
-        tvGestureOffsetValue = findViewById(R.id.tv_gesture_offset_value)
-        tvGestureAlphaValue = findViewById(R.id.tv_gesture_alpha_value)
-
-        // ========== 应用列表设置 ==========
-        seekbarAppListWidth = findViewById(R.id.seekbar_applist_width)
-        seekbarAppListHeight = findViewById(R.id.seekbar_applist_height)
-        seekbarAppListOffset = findViewById(R.id.seekbar_applist_offset)
-        seekbarAppListCorner = findViewById(R.id.seekbar_applist_corner)
-        seekbarAppListDim = findViewById(R.id.seekbar_applist_dim)
-        tvAppListWidthValue = findViewById(R.id.tv_applist_width_value)
-        tvAppListHeightValue = findViewById(R.id.tv_applist_height_value)
-        tvAppListOffsetValue = findViewById(R.id.tv_applist_offset_value)
-        tvAppListCornerValue = findViewById(R.id.tv_applist_corner_value)
-        tvAppListDimValue = findViewById(R.id.tv_applist_dim_value)
-
-        // ========== 列表图标间距 ==========
-        seekbarIconSpacing = findViewById(R.id.seekbar_icon_spacing)
-        tvIconSpacingValue = findViewById(R.id.tv_icon_spacing_value)
-
-        // ========== 设置SeekBar范围 ==========
-        seekbarAppListOffset.max = 400      // 0-400dp
-        seekbarAppListHeight.max = 190      // 0.1-2.0
-        seekbarAppListWidth.max = 100       // 0.5-1.0
-        seekbarAppListCorner.max = 50       // 0-50dp
-        seekbarAppListDim.max = 90          // 0-90%
-        seekbarIconSpacing.max = 30         // 0-30dp
-    }
-
-    private fun setupListeners() {
-        // ========== 工作台启用/禁用 ==========
-        switchEnabled.setOnCheckedChangeListener { _, isChecked ->
-            settings.enabled = isChecked
-            if (isChecked) {
-                WorkbenchManager.showWorkbench()
-                Toast.makeText(this, "工作台已启用", Toast.LENGTH_SHORT).show()
-            } else {
-                WorkbenchManager.hideWorkbench()
-                Toast.makeText(this, "工作台已禁用", Toast.LENGTH_SHORT).show()
+            section("工作台") {
+                settingsSwitch("启用工作台", settings.enabled) {
+                    settings.enabled = it
+                    if (it) WorkbenchManager.showWorkbench() else WorkbenchManager.hideWorkbench()
+                }
+                settingsSlider("工作台高度", 5, 300, settings.height, "dp") {
+                    settings.height = it
+                    if (settings.enabled) WorkbenchManager.showWorkbench()
+                }
             }
-        }
 
-        // ========== 工作台高度 ==========
-        seekbarHeight.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val height = (5 + progress * 2.95).toInt()
-                tvHeightValue.text = "${height}dp"
-                if (fromUser) {
-                    settings.height = height
-                    if (settings.enabled) {
-                        WorkbenchManager.showWorkbench()
+            section("左侧手势条") {
+                settingsSlider("宽度", 2, 32, gestureWidth, "dp") { gestureWidth = it }
+                settingsSlider("高度（0 为全屏）", 0, 820, gestureHeight, "dp") { gestureHeight = it }
+                settingsSlider("垂直偏移", 0, 800, gestureOffset, "dp") { gestureOffset = it }
+                settingsSlider("不透明度", 0, 100, gestureAlpha, "%") { gestureAlpha = it }
+                hint("手势条设置需点下方按钮应用并持久化")
+                row { button("应用手势设置") { applyGesture() } }
+            }
+
+            section("九键面板") {
+                settingsSlider("面板宽度", 50, 100, (settings.appListWidthRatio * 100).toInt(), "%") {
+                    settings.appListWidthRatio = it / 100f
+                    workbenchManager?.hideAppsList()
+                }
+                settingsSlider("面板高度", 10, 200, (settings.appListHeightRatio * 100).toInt(), "%") {
+                    settings.appListHeightRatio = it / 100f
+                    workbenchManager?.hideAppsList()
+                }
+                settingsSlider("垂直偏移", 0, 400, settings.appListVerticalOffset, "dp") {
+                    settings.appListVerticalOffset = it
+                    workbenchManager?.hideAppsList()
+                }
+                settingsSlider("面板圆角", 0, 50, settings.appListCornerRadius, "dp") {
+                    settings.appListCornerRadius = it
+                    workbenchManager?.hideAppsList()
+                }
+                settingsSlider("背景暗度", 0, 90, (settings.appListDimAlpha / 0.9f * 100).toInt(), "%") {
+                    settings.appListDimAlpha = it / 100f * 0.9f
+                    workbenchManager?.hideAppsList()
+                }
+                settingsSlider("图标间距", 0, 30, settings.iconSpacing, "dp") {
+                    settings.iconSpacing = it
+                    if (settings.enabled) WorkbenchManager.showWorkbench()
+                }
+            }
+
+            section("子设置") {
+                settingsActionCard("键盘与工作台外观", "键帽十种预设、工作台独立键帽、图标裁切样式、AI 栏与配色",
+                    "打开") { open(KeyboardStyleActivity::class.java) }
+                settingsActionCard("屏幕取字与 Pin 池", "OCR 优先级、取字确认、显示模式与自动保存策略",
+                    "打开") { open(InspireSettingsActivity::class.java) }
+                settingsActionCard("搜索引擎", "管理搜索链接与默认引擎",
+                    "打开") { open(SearchEngineSettingsActivity::class.java) }
+                settingsActionCard("外观", "屏幕内容与 Pin 池的窗口模糊",
+                    "打开") { open(AppearanceSettingsActivity::class.java) }
+                settingsActionCard("AI 会话", "打开 CodexWeb 对话窗口",
+                    "打开") { open(AiConsoleActivity::class.java) }
+            }
+
+            section("应用管理") {
+                row {
+                    button("图标包") { workbenchManager?.showIconPackPicker(this@WorkbenchSettingsActivity) }
+                    button("刷新应用") { workbenchManager?.refreshApps() }
+                }
+                row {
+                    button("冻结应用") { workbenchManager?.showFreezeManagementDialog(this@WorkbenchSettingsActivity) }
+                    button("隐藏应用") { workbenchManager?.showHiddenManagementDialog(this@WorkbenchSettingsActivity) }
+                }
+                row {
+                    button("Pin 池") {
+                        PinPoolFloating.start(applicationContext, side = TriggerSide.peek())
                     }
+                    button("完成") { finish() }
                 }
             }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
-        // ========== 手势条宽度 ==========
-        seekbarGestureWidth.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val width = (2 + progress).toInt()
-                tvGestureWidthValue.text = "${width}dp"
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 手势条高度 ==========
-        seekbarGestureHeight.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val height = if (progress == 0) 0 else (20 + progress * 8).toInt()
-                tvGestureHeightValue.text = if (height == 0) "全屏" else "${height}dp"
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 手势条偏移 ==========
-        seekbarGestureOffset.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val offset = (progress * 2).toInt()
-                tvGestureOffsetValue.text = "${offset}dp"
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 手势条透明度 ==========
-        seekbarGestureAlpha.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                tvGestureAlphaValue.text = "${progress}%"
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 应用列表宽度（0.5-1.0） ==========
-        seekbarAppListWidth.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val ratio = (50 + progress * 0.5f) / 100f
-                tvAppListWidthValue.text = "${(ratio * 100).toInt()}%"
-                if (fromUser) {
-                    settings.appListWidthRatio = ratio
-                    workbenchManager?.hideAppsList()
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 应用列表高度（0.1-2.0） ==========
-        seekbarAppListHeight.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val ratio = (10 + progress) / 100f
-                tvAppListHeightValue.text = "${(ratio * 100).toInt()}%"
-                if (fromUser) {
-                    settings.appListHeightRatio = ratio
-                    workbenchManager?.hideAppsList()
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 应用列表垂直偏移（0-400dp） ==========
-        seekbarAppListOffset.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val offset = progress
-                tvAppListOffsetValue.text = "${offset}dp"
-                if (fromUser) {
-                    settings.appListVerticalOffset = offset
-                    workbenchManager?.hideAppsList()
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 应用列表圆角（0-50dp） ==========
-        seekbarAppListCorner.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val radius = progress
-                tvAppListCornerValue.text = "${radius}dp"
-                if (fromUser) {
-                    settings.appListCornerRadius = radius
-                    workbenchManager?.hideAppsList()
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 应用列表背景透明度（0-0.9） ==========
-        seekbarAppListDim.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val alpha = progress / 100f * 0.9f
-                tvAppListDimValue.text = "${(alpha * 100).toInt()}%"
-                if (fromUser) {
-                    settings.appListDimAlpha = alpha
-                    workbenchManager?.hideAppsList()
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 列表图标左右间距 ==========
-        seekbarIconSpacing.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                tvIconSpacingValue.text = "${progress}dp"
-                if (fromUser) {
-                    settings.iconSpacing = progress
-                    if (settings.enabled) {
-                        WorkbenchManager.showWorkbench()
-                    }
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        // ========== 按钮监听器 ==========
-        findViewById<Button>(R.id.btn_apply_settings).setOnClickListener {
-            applySettings()
-        }
-
-        findViewById<Button>(R.id.btn_close).setOnClickListener {
-            finish()
-        }
-
-        findViewById<Button>(R.id.btn_ai_console)?.setOnClickListener {
-            startActivity(Intent(this, AiConsoleActivity::class.java))
-        }
-
-        findViewById<Button>(R.id.btn_search_engine_settings)?.setOnClickListener {
-            startActivity(Intent(this, SearchEngineSettingsActivity::class.java))
-        }
-
-        findViewById<Button>(R.id.btn_pin_pool)?.setOnClickListener {
-            PinPoolFloating.start(applicationContext, side = TriggerSide.peek())
-        }
-
-        findViewById<Button>(R.id.btn_inspire_settings)?.setOnClickListener {
-            startActivity(Intent(this, InspireSettingsActivity::class.java))
-        }
-
-        findViewById<Button>(R.id.btn_appearance_settings)?.setOnClickListener {
-            startActivity(Intent(this, AppearanceSettingsActivity::class.java))
-        }
-
-        findViewById<Button>(R.id.btn_keyboard_style)?.setOnClickListener {
-            startActivity(Intent(this, KeyboardStyleActivity::class.java))
-        }
-
-        findViewById<Button>(R.id.btn_icon_pack)?.setOnClickListener {
-            try {
-                Log.d("Settings", "=== 图标包按钮被点击 ===")
-                Toast.makeText(this, "正在加载图标包...", Toast.LENGTH_SHORT).show()
-
-                if (workbenchManager == null) {
-                    Log.e("Settings", "workbenchManager is null")
-                    Toast.makeText(this, "WorkbenchManager 未初始化", Toast.LENGTH_LONG).show()
-                    return@setOnClickListener
-                }
-
-                workbenchManager?.showIconPackPicker(this)
-            } catch (e: Exception) {
-                Log.e("Settings", "Icon pack error", e)
-                Toast.makeText(this, "无法打开图标包选择: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-        }
-
-        findViewById<Button>(R.id.btn_freeze_management)?.setOnClickListener {
-            try {
-                if (workbenchManager == null) {
-                    Toast.makeText(this, "WorkbenchManager 未初始化", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                workbenchManager?.showFreezeManagementDialog(this)
-            } catch (e: Exception) {
-                Log.e("Settings", "Freeze management error", e)
-                Toast.makeText(this, "打开失败: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        findViewById<Button>(R.id.btn_hidden_management)?.setOnClickListener {
-            try {
-                if (workbenchManager == null) {
-                    Toast.makeText(this, "WorkbenchManager 未初始化", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                workbenchManager?.showHiddenManagementDialog(this)
-            } catch (e: Exception) {
-                Log.e("Settings", "Hidden management error", e)
-                Toast.makeText(this, "打开失败: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        findViewById<Button>(R.id.btn_refresh_apps)?.setOnClickListener {
-            if (workbenchManager == null) {
-                Toast.makeText(this, "WorkbenchManager 未初始化", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            workbenchManager?.refreshApps()
-            Toast.makeText(this, "已触发应用列表刷新", Toast.LENGTH_SHORT).show()
-        }
-
+        applyGesture()
     }
 
-    private fun applySettings() {
-        try {
-            // ========== 应用工作台设置 ==========
-            val heightProgress = seekbarHeight.progress
-            val height = (5 + heightProgress * 2.95).toInt()
-            settings.height = height
-
-            // ========== 应用手势条设置并持久化 ==========
-            val width = (2 + seekbarGestureWidth.progress).toInt()
-            val heightVal = if (seekbarGestureHeight.progress == 0) 0 else (20 + seekbarGestureHeight.progress * 8).toInt()
-            val offset = (seekbarGestureOffset.progress * 2).toInt()
-            val alpha = seekbarGestureAlpha.progress / 100f
-
-            gestureManager.updateConfig(width, heightVal, offset, alpha)
-
-            // 保存到 settings（持久化）
-            settings.gestureStripWidth = width
-            settings.gestureStripHeight = heightVal
-            settings.gestureStripOffset = offset
-            settings.gestureStripAlpha = alpha
-
-            // ========== 应用应用列表设置 ==========
-            settings.appListWidthRatio = (50 + seekbarAppListWidth.progress * 0.5f) / 100f
-            settings.appListHeightRatio = (10 + seekbarAppListHeight.progress) / 100f
-            settings.appListVerticalOffset = seekbarAppListOffset.progress
-            settings.appListCornerRadius = seekbarAppListCorner.progress
-            settings.appListDimAlpha = seekbarAppListDim.progress / 100f * 0.9f
-
-            // ========== 列表图标间距 ==========
-            settings.iconSpacing = seekbarIconSpacing.progress
-
-            if (settings.enabled) {
-                WorkbenchManager.showWorkbench()
-            }
-
-            writeLog("Settings applied successfully")
-            Toast.makeText(
-                this,
-                "设置已应用\n高度: ${height}dp\n手势偏移: ${offset}dp\n面板宽度: ${(settings.appListWidthRatio * 100).toInt()}%\n面板高度: ${(settings.appListHeightRatio * 100).toInt()}%",
-                Toast.LENGTH_SHORT
-            ).show()
-
-        } catch (e: Exception) {
-            writeLog("❌ Apply failed: ${e.message}")
-            e.printStackTrace()
-            Toast.makeText(this, "应用失败: ${e.message}", Toast.LENGTH_LONG).show()
-        }
+    private fun open(cls: Class<*>) {
+        startActivity(Intent(this, cls))
     }
 
-    private fun loadSettings() {
-        // ========== 工作台设置 ==========
-        switchEnabled.isChecked = settings.enabled
-
-        val height = settings.height
-        val progress = ((height - 5) / 2.95).toInt().coerceIn(0, 100)
-        seekbarHeight.progress = progress
-        tvHeightValue.text = "${height}dp"
-
-        // ========== 手势条设置（从 settings 读取持久化数据） ==========
-        val savedWidth = settings.gestureStripWidth
-        val savedHeight = settings.gestureStripHeight
-        val savedOffset = settings.gestureStripOffset
-        val savedAlpha = (settings.gestureStripAlpha * 100).toInt()
-
-        seekbarGestureWidth.progress = (savedWidth - 2).coerceIn(0, 30)
-        tvGestureWidthValue.text = "${savedWidth}dp"
-
-        val heightProgress = if (savedHeight == 0) 0 else ((savedHeight - 20) / 8).coerceIn(0, 100)
-        seekbarGestureHeight.progress = heightProgress
-        tvGestureHeightValue.text = if (savedHeight == 0) "全屏" else "${savedHeight}dp"
-
-        seekbarGestureOffset.progress = (savedOffset / 2).coerceIn(0, 400)
-        tvGestureOffsetValue.text = "${savedOffset}dp"
-
-        seekbarGestureAlpha.progress = savedAlpha.coerceIn(0, 100)
-        tvGestureAlphaValue.text = "${savedAlpha}%"
-
-        // ========== 应用列表设置 ==========
-        val widthRatio = settings.appListWidthRatio
-        seekbarAppListWidth.progress = ((widthRatio - 0.5f) / 0.5f * 100).toInt().coerceIn(0, 100)
-        tvAppListWidthValue.text = "${(widthRatio * 100).toInt()}%"
-
-        val heightRatio = settings.appListHeightRatio
-        seekbarAppListHeight.progress = ((heightRatio - 0.1f) * 100).toInt().coerceIn(0, 190)
-        tvAppListHeightValue.text = "${(heightRatio * 100).toInt()}%"
-
-        val verticalOffset = settings.appListVerticalOffset
-        seekbarAppListOffset.progress = verticalOffset.coerceIn(0, 400)
-        tvAppListOffsetValue.text = "${verticalOffset}dp"
-
-        val cornerRadius = settings.appListCornerRadius
-        seekbarAppListCorner.progress = cornerRadius.coerceIn(0, 50)
-        tvAppListCornerValue.text = "${cornerRadius}dp"
-
-        val dimAlpha = settings.appListDimAlpha
-        seekbarAppListDim.progress = (dimAlpha / 0.9f * 100).toInt().coerceIn(0, 90)
-        tvAppListDimValue.text = "${(dimAlpha * 100).toInt()}%"
-
-        // ========== 列表图标间距 ==========
-        val spacing = settings.iconSpacing
-        seekbarIconSpacing.progress = spacing.coerceIn(0, 30)
-        tvIconSpacingValue.text = "${spacing}dp"
-
-    }
-
-    /**
-     * 应用持久化的手势条设置
-     */
-    private fun applySavedGestureSettings() {
-        val savedWidth = settings.gestureStripWidth
-        val savedHeight = settings.gestureStripHeight
-        val savedOffset = settings.gestureStripOffset
-        val savedAlpha = settings.gestureStripAlpha
-        gestureManager.updateConfig(savedWidth, savedHeight, savedOffset, savedAlpha)
-    }
-
-    private fun writeLog(message: String) {
-        try {
-            val file = File(filesDir, "workbench_settings_log.txt")
-            if (file.exists() && file.length() > 512L * 1024L) file.delete()
-            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-            file.appendText("[$timestamp] $message\n")
-        } catch (e: Exception) {}
+    private fun applyGesture() {
+        gestureManager.updateConfig(gestureWidth, gestureHeight, gestureOffset, gestureAlpha / 100f)
+        settings.gestureStripWidth = gestureWidth
+        settings.gestureStripHeight = gestureHeight
+        settings.gestureStripOffset = gestureOffset
+        settings.gestureStripAlpha = gestureAlpha / 100f
+        Toast.makeText(this, "手势设置已应用", Toast.LENGTH_SHORT).show()
     }
 }

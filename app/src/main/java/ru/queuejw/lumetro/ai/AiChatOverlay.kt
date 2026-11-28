@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.text.InputType
 import android.util.Base64
 import android.text.TextUtils
@@ -258,9 +259,13 @@ class AiChatOverlay(
         if (now - lastAutoScrollMs < autoScrollIntervalMs) return
         lastAutoScrollMs = now
         chatScroll.post {
+            // post 是异步的：从入队到执行期间用户可能已上翻。这里必须再校验一次，
+            // 否则平滑动画会在用户上翻后仍把视图拽回底部（"无法打断"的根因）。
+            if (!followIntent) return@post
             val maxScroll = (chatList.height - chatScroll.height +
                 chatScroll.paddingTop + chatScroll.paddingBottom).coerceAtLeast(0)
-            if (maxScroll > chatScroll.scrollY) {
+            // 微小差值不滚，避免逐 token 的抖动式跟随
+            if (maxScroll - chatScroll.scrollY > dp(2)) {
                 chatScroll.smoothScrollTo(0, maxScroll)
             }
         }
@@ -480,12 +485,25 @@ class AiChatOverlay(
             isVerticalScrollBarEnabled = false
             // 用户一触摸列表就视为要自己查看，暂停流式自动跟随；
             // 松手后若正好贴底则恢复，保证继续跟着最新输出。
+            var touchStartY = 0f
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         // 只暂停流式跟随，不在 DOWN 阶段改焦点/键盘：
                         // 键盘收起会立刻改变布局高度，导致 UP 时点击坐标漂移，气泡点不中。
                         followIntent = false
+                        touchStartY = ev.y
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        // 真正拖动超过阈值时，取消正在进行的平滑滚动动画——
+                        // smoothScrollTo 的动画不会因为 followIntent 变 false 而自动停，
+                        // 必须 stopScroll() 才能让用户上翻立刻生效（"可打断"的关键）。
+                        if (kotlin.math.abs(ev.y - touchStartY) > dp(8)) {
+                            followIntent = false
+                            // ScrollView 无 stopScroll()；scrollTo 到当前位置会
+                            // 中止内部 OverScroller 的平滑动画，实现立刻打断。
+                            chatScroll.scrollTo(chatScroll.scrollX, chatScroll.scrollY)
+                        }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         followIntent = !v.canScrollVertically(1)
@@ -1244,19 +1262,30 @@ class AiChatOverlay(
                         Toast.makeText(context, "语音引擎初始化失败（$status），请检查系统 TTS 设置",
                             Toast.LENGTH_LONG).show()
                         pendingAutoText = null
+                        TtsAudioFocus.abandon(this@AiChatOverlay)
                         return@post
                     }
                     val ready = autoTts ?: return@post
+                    // 朗读结束/出错归还焦点，媒体才能恢复播放；回调可能不在主线程，归还是线程安全的
+                    ready.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) = TtsAudioFocus.abandon(this@AiChatOverlay)
+                        override fun onError(utteranceId: String?) = TtsAudioFocus.abandon(this@AiChatOverlay)
+                    })
                     val lang = ready.setLanguage(Locale.CHINA)
                     if (lang == TextToSpeech.LANG_MISSING_DATA ||
                         lang == TextToSpeech.LANG_NOT_SUPPORTED) {
                         Toast.makeText(context, "系统缺少中文语音包，自动朗读无法使用",
                             Toast.LENGTH_LONG).show()
                         pendingAutoText = null
+                        TtsAudioFocus.abandon(this@AiChatOverlay)
                         return@post
                     }
+                    // 引擎初始化是异步的：这期间若媒体/来电抢占了焦点，焦点已不属于本朗读，不再念旧文本
                     pendingAutoText?.let {
-                        ready.speak(MarkdownText.plain(it), TextToSpeech.QUEUE_FLUSH, null, "auto")
+                        if (TtsAudioFocus.isHeldBy(this@AiChatOverlay)) {
+                            ready.speak(MarkdownText.plain(it), TextToSpeech.QUEUE_FLUSH, null, "auto")
+                        }
                     }
                     pendingAutoText = null
                 }
@@ -1264,12 +1293,17 @@ class AiChatOverlay(
         } catch (e: Exception) {
             Toast.makeText(context, "语音引擎不可用：${e.message}", Toast.LENGTH_LONG).show()
             pendingAutoText = null
+            TtsAudioFocus.abandon(this@AiChatOverlay)
         }
     }
 
-    /** 本端回复完成后自动朗读（本地 TTS，不上传音频）；调用方已保证一条只读一次 */
+    /**
+     * 本端回复完成后自动朗读（本地 TTS，不上传音频）；调用方已保证一条只读一次。
+     * 读前先申请音频焦点：拿不到说明此刻有更重要的声音（音乐/通话/语音输入），直接放弃本次朗读。
+     */
     private fun speakAuto(text: String) {
         if (!autoSpeak || text.isBlank()) return
+        if (!TtsAudioFocus.request(context, this) { onSpeakInterrupted() }) return
         val engine = autoTts
         if (engine == null) {
             // 引擎尚未就绪，等初始化回调里播；不要在引擎已就绪时残留 pending，
@@ -1283,7 +1317,16 @@ class AiChatOverlay(
         }
     }
 
+    /** 被外界声音打断：立即停读但不销毁引擎（下次回复可快速恢复），焦点已被系统抢走无需归还 */
+    private fun onSpeakInterrupted() {
+        post {
+            pendingAutoText = null
+            autoTts?.stop()
+        }
+    }
+
     private fun stopAutoTts() {
+        TtsAudioFocus.abandon(this)
         pendingAutoText = null
         autoTts?.stop()
         autoTts?.shutdown()

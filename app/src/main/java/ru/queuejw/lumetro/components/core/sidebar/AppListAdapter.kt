@@ -54,7 +54,10 @@ class AppListAdapter(
             }
             setPadding(16.dpToPx(), 4.dpToPx(), 16.dpToPx(), 4.dpToPx())
             gravity = Gravity.CENTER_VERTICAL
-            background = ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(parent.context, 12f, 3f)
+            background = ru.queuejw.lumetro.components.ui.keycap.KeycapHelper.create(
+                parent.context, 12f, 3f,
+                style = ru.queuejw.lumetro.components.freeform.WorkbenchStyle(parent.context).keycapStyle
+            )
         }
 
         val icon = ImageView(parent.context).apply {

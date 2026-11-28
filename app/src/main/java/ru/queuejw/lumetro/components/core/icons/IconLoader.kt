@@ -21,6 +21,8 @@ class IconLoader(
     var iconPackManager: IconPackManager? = null
     private var diskCache: DiskLruCache? = null
     private var iconSize: Int? = null
+    /** 已解析的图标包实例：避免每个图标都重新解析 appfilter.xml */
+    private var resolvedPack: IconPackManager.IconPack? = null
 
     private val cacheSize by lazy {
         ((Runtime.getRuntime().maxMemory() / 1024) / 8).toInt()
@@ -111,6 +113,23 @@ class IconLoader(
         } catch (_: PackageManager.NameNotFoundException) { false }
     }
 
+    /**
+     * 该应用的图标是否由当前图标包提供（被图标包“覆盖”）。
+     * 覆盖的图标自身风格已统一、形状也已规整，无需再做工作台的裁切窗口。
+     * 未启用图标包、包不存在、或该应用回退到系统默认图标时返回 false。
+     */
+    fun isCoveredByIconPack(context: Context, mPackage: String?): Boolean {
+        if (!loadFromIconPack || iconPackPackage == null || mPackage == null) return false
+        return try {
+            if (iconPackManager == null) iconPackManager = getIconPackManager(context)
+            if (resolvedPack == null) resolvedPack = iconPackManager?.getIconPackWithName(iconPackPackage)
+            val pack = resolvedPack ?: return false
+            pack.getDrawableIconForPackage(mPackage, null) != null
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun removeIconPack(prefs: Prefs) {
         prefs.iconPackPackage = null
     }
@@ -124,6 +143,7 @@ class IconLoader(
 
     fun resetIconLoader(closeCache: Boolean = false) {
         iconPackManager = null
+        resolvedPack = null
         iconSize = null
         memoryCache.evictAll()
         if (closeCache) {
@@ -134,6 +154,7 @@ class IconLoader(
 
     fun clearCache(context: Context) {
         iconPackManager = null
+        resolvedPack = null
         memoryCache.evictAll()
         if (diskCache == null) diskCache = getDiskCache(context)
         diskCache?.delete()

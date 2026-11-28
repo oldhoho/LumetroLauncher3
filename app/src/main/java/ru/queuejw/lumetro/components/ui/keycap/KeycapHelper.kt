@@ -33,8 +33,35 @@ object KeycapHelper {
         frameVisible: Boolean = true,
         image: Bitmap? = null,
         frameImage: Bitmap? = null,
-        frameAlpha: Int = 255
+        frameAlpha: Int = 255,
+        style: Int = KeycapDrawable.STYLE_GLASS
     ): Drawable {
+        // 无用户贴图时走纯 Canvas 的冷光玻璃键帽：一次绘制、无 PNG 解码、
+        // 无多层 overdraw。用户导入过键帽/边框贴图时仍走旧 LayerDrawable 路径，
+        // 保证自定义外观不失效。
+        if (image == null && frameImage == null) {
+            val density = context.resources.displayMetrics.density
+            val radius = dp(context, cornerDp).toFloat()
+            val depth = dp(context, depthDp)
+            return StateListDrawable().apply {
+                addState(
+                    intArrayOf(android.R.attr.state_pressed),
+                    KeycapDrawable(
+                        radius, depth, true,
+                        baseColor, topColor, bottomColor, pressedTopColor, pressedBottomColor,
+                        strokeColor, highlightVisible, frameVisible, frameAlpha, tint, density, style
+                    )
+                )
+                addState(
+                    intArrayOf(),
+                    KeycapDrawable(
+                        radius, depth, false,
+                        baseColor, topColor, bottomColor, pressedTopColor, pressedBottomColor,
+                        strokeColor, highlightVisible, frameVisible, frameAlpha, tint, density, style
+                    )
+                )
+            }
+        }
         return StateListDrawable().apply {
             addState(
                 intArrayOf(android.R.attr.state_pressed),
@@ -168,8 +195,12 @@ object KeycapHelper {
         }
 
         // 金属边框贴图作为最顶层（中间透明，露出键帽面）
+        var frameIndex = -1
         if (frameVisible) {
-            buildFrame(context, radius, frameImage, frameAlpha)?.let { content.add(it) }
+            buildFrame(context, radius, frameImage, frameAlpha)?.let {
+                frameIndex = content.size
+                content.add(it)
+            }
         }
 
         val faceTop = if (pressed) depth else 0
@@ -186,6 +217,8 @@ object KeycapHelper {
             // highlight: 占顶面约 30%
             setLayerInset(3, 0, faceTop, 0, faceBottom + (if (pressed) 0 else (depth * 7 / 10)))
             if (tint != null) setLayerInset(4, 0, faceTop, 0, faceBottom)
+            // 边框与顶面同步下沉，避免按下时框与面错位（旧版漏设导致纯色键帽框不动）
+            if (frameIndex >= 0) setLayerInset(frameIndex, 0, faceTop, 0, faceBottom)
         }
     }
 
